@@ -570,26 +570,44 @@ export default function App() {
   // ============ SOG ↔ USDOG 컨버트 (현재 시세 기준) ============
   const [convertMode, setConvertMode] = useState("toSog"); // "toSog" | "toUsdog"
   const [convertInput, setConvertInput] = useState("");
-  const convertAmount = Number(convertInput) || 0;
+  const [convertIsMax, setConvertIsMax] = useState(false); // MAX 선택 시 원본 정밀값 사용
+  const convertAmount = convertIsMax
+    ? (convertMode === "toSog" ? balance : sogHolding)
+    : (Number(convertInput) || 0);
 
   const convertPreview = convertMode === "toSog"
     ? convertAmount / price // USDOG → 받을 SOG
     : convertAmount * price; // SOG → 받을 USDOG
 
+  const handleConvertInputChange = (val) => {
+    setConvertIsMax(false);
+    setConvertInput(val);
+  };
+
+  const handleConvertMax = () => {
+    setConvertIsMax(true);
+    // 화면 표시는 깔끔하게 반올림 (실제 전송은 convertAmount의 원본 값 사용)
+    const raw = convertMode === "toSog" ? balance : sogHolding;
+    setConvertInput(raw.toFixed(convertMode === "toSog" ? 2 : 4));
+  };
+
   const doConvert = () => {
     if (convertAmount <= 0) return;
     if (convertMode === "toSog") {
       if (convertAmount > balance) return;
-      setBalance((b) => b - convertAmount);
-      setSogHolding((s) => s + convertAmount / price);
-      pushLog(`🔄 환전 · ${convertAmount.toFixed(2)} USDOG → ${(convertAmount / price).toFixed(2)} SOG`, "neutral");
+      const sogReceived = convertAmount / price;
+      setBalance((b) => Math.max(0, b - convertAmount));
+      setSogHolding((s) => s + sogReceived);
+      pushLog(`🔄 환전 · ${convertAmount.toFixed(2)} USDOG → ${sogReceived.toFixed(2)} SOG`, "neutral");
     } else {
       if (convertAmount > sogHolding) return;
-      setSogHolding((s) => s - convertAmount);
-      setBalance((b) => b + convertAmount * price);
-      pushLog(`🔄 환전 · ${convertAmount.toFixed(2)} SOG → ${(convertAmount * price).toFixed(2)} USDOG`, "neutral");
+      const usdogReceived = convertAmount * price;
+      setSogHolding((s) => Math.max(0, s - convertAmount));
+      setBalance((b) => b + usdogReceived);
+      pushLog(`🔄 환전 · ${convertAmount.toFixed(2)} SOG → ${usdogReceived.toFixed(2)} USDOG`, "neutral");
     }
     setConvertInput("");
+    setConvertIsMax(false);
   };
 
   const handleAddPoint = (pt) => {
@@ -789,37 +807,40 @@ export default function App() {
         <div className="text-[11px] font-semibold text-[#8b96a5] mb-2">{t.convertTitle}</div>
         <div className="flex rounded-lg overflow-hidden border border-[#1a1f2b] mb-2 text-[11px] font-semibold">
           <button
-            onClick={() => setConvertMode("toSog")}
+            onClick={() => { setConvertMode("toSog"); setConvertInput(""); setConvertIsMax(false); }}
             className={`flex-1 py-1.5 ${convertMode === "toSog" ? "bg-[#e8b339] text-black" : "bg-[#131722] text-[#5b6472]"}`}
           >
             {t.convertToSog}
           </button>
           <button
-            onClick={() => setConvertMode("toUsdog")}
+            onClick={() => { setConvertMode("toUsdog"); setConvertInput(""); setConvertIsMax(false); }}
             className={`flex-1 py-1.5 ${convertMode === "toUsdog" ? "bg-[#e8b339] text-black" : "bg-[#131722] text-[#5b6472]"}`}
           >
             {t.convertToUsdog}
           </button>
         </div>
         <div className="text-[10px] text-[#5b6472] flex justify-between mb-1.5">
-          <span>{t.convertHolding}: {convertMode === "toSog" ? `${balance.toFixed(2)} USDOG` : `${sogHolding.toFixed(2)} SOG`}</span>
+          <span>{t.convertHolding}: {convertMode === "toSog" ? `${balance.toFixed(2)} USDOG` : `${sogHolding.toFixed(4)} SOG`}</span>
           <span>{t.convertPrice} {price.toFixed(6)}</span>
         </div>
         <div className="flex gap-2 mb-2">
           <input
             type="number"
             value={convertInput}
-            onChange={(e) => setConvertInput(e.target.value)}
+            onChange={(e) => handleConvertInputChange(e.target.value)}
             placeholder={convertMode === "toSog" ? t.convertPlaceholderSog : t.convertPlaceholderUsdog}
             className="flex-1 bg-[#131722] border border-[#1a1f2b] rounded px-3 py-2 text-sm font-mono focus:outline-none focus:border-[#3a4658]"
           />
           <button
-            onClick={() => setConvertInput(String(convertMode === "toSog" ? balance : sogHolding))}
-            className="px-3 rounded bg-[#131722] hover:bg-[#1a1f2b] text-[#e8b339] text-xs font-bold border border-[#1a1f2b]"
+            onClick={handleConvertMax}
+            className={`px-3 rounded text-xs font-bold border ${convertIsMax ? "bg-[#e8b339] text-black border-[#e8b339]" : "bg-[#131722] hover:bg-[#1a1f2b] text-[#e8b339] border-[#1a1f2b]"}`}
           >
             MAX
           </button>
         </div>
+        {convertIsMax && (
+          <div className="text-[9.5px] text-[#3a4658] -mt-1 mb-2">보유 전량이 선택되었습니다 (정확한 수량으로 환전됩니다)</div>
+        )}
         {convertAmount > 0 && (
           <div className="text-[10.5px] text-[#8b96a5] mb-2 font-mono">
             {t.convertReceive}: <span className="text-[#e8b339] font-bold">{convertPreview.toFixed(4)} {convertMode === "toSog" ? "SOG" : "USDOG"}</span>
