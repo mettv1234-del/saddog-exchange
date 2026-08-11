@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useMemo } from "react";
 import { ChevronDown, Play, X, Pencil, Trash2, LogIn, TrendingUp, TrendingDown, ZoomIn, ZoomOut, Globe, DoorOpen } from "lucide-react";
+import { Analytics } from "@vercel/analytics/react";
 import { USDOG_LOGO, SOG_LOGO } from "./logos.js";
 import { useTranslation } from "./i18n.js";
 
@@ -662,7 +663,7 @@ export default function App() {
   // ============ SOG ↔ USDOG 컨버트 (현재 시세 기준) ============
   const [convertMode, setConvertMode] = useState("toSog"); // "toSog" | "toUsdog"
   const [convertInput, setConvertInput] = useState("");
-  const [convertIsMax, setConvertIsMax] = useState(false); // MAX 선택 시 원본 정밀값 사용
+  const [convertIsMax, setConvertIsMax] = useState(false); // MAX 선택 시 원�� 정밀값 사용
   const convertAmount = convertIsMax
     ? (convertMode === "toSog" ? balance : sogHolding)
     : (Number(convertInput) || 0);
@@ -1139,6 +1140,7 @@ export default function App() {
       {flashLiquidation && (
         <div className="fixed inset-0 bg-[#f6465d] opacity-20 pointer-events-none z-40 animate-pulse" />
       )}
+      <Analytics />
     </div>
   );
 }
