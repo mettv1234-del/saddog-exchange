@@ -173,7 +173,7 @@ function ichimoku(candles) {
 }
 
 // ============ Chart w/ pan + zoom ============
-function TradingChart({ allCandles, liqPrice, entryPrice, drawings, onAddPoint, drawMode, viewStart, viewCount, onPan, vZoom }) {
+function TradingChart({ allCandles, liqPrice, entryPrice, drawings, onAddPoint, drawMode, viewStart, viewCount, onPan, vZoom, onZoomH, onZoomV }) {
   const w = 1000, h = 400, padL = 8, padR = 82, padT = 10, padB = 6;
   const candles = allCandles.slice(viewStart, viewStart + viewCount);
   const closes = allCandles.map((c) => c.c);
@@ -232,6 +232,16 @@ function TradingChart({ allCandles, liqPrice, entryPrice, drawings, onAddPoint, 
   };
   const handlePointerUp = () => { dragRef.current = null; };
 
+  // 마우스 휠: 세로 스크롤 = 좌우(캔들 개수) 확대, Shift+휠 = 세로(가격범위) 확대
+  const handleWheel = (e) => {
+    e.preventDefault();
+    if (e.shiftKey) {
+      onZoomV && onZoomV(e.deltaY < 0 ? 1 : -1);
+    } else {
+      onZoomH && onZoomH(e.deltaY < 0 ? 1 : -1);
+    }
+  };
+
   // 클릭 좌표 → 데이터 좌표(절대 캔들 인덱스 + 가격)로 변환해 저장 (뷰가 바뀌어도 안전)
   const handleClick = (e) => {
     if (!drawMode) return;
@@ -264,6 +274,7 @@ function TradingChart({ allCandles, liqPrice, entryPrice, drawings, onAddPoint, 
       onPointerMove={handlePointerMove}
       onPointerUp={handlePointerUp}
       onPointerLeave={handlePointerUp}
+      onWheel={handleWheel}
     >
       <defs>
         <linearGradient id="bgGrad" x1="0" y1="0" x2="0" y2="1">
@@ -461,7 +472,8 @@ export default function App() {
   const [marginMode, setMarginMode] = useState("cross"); // "cross" | "isolated"
   const [marginInput, setMarginInput] = useState("");
   const [log, setLog] = useState([]);
-  const [liquidated, setLiquidated] = useState(false);
+  const [liquidated, setLiquidated] = useState(false); // deprecated: kept for disabled= checks below
+  const [flashLiquidation, setFlashLiquidation] = useState(false);
   const [tab, setTab] = useState("positions");
   const [showInfo, setShowInfo] = useState(false);
   const [clickFx, setClickFx] = useState(null);
@@ -508,13 +520,10 @@ export default function App() {
     const hit = position.side === "long" ? price <= liqPrice : price >= liqPrice;
     if (hit) {
       pushLog(`💥 청산 · ${position.side.toUpperCase()} ${position.leverage}x (${position.mode === "isolated" ? "격리" : "교차"}) · 증거금 ${position.margin.toFixed(2)} USDOG 손실`, "bad");
+      // 실제 거래소처럼 모달 없이 조용히 포지션만 사라짐 (잔고는 그대로, 이미 증거금은 차감된 상태)
       setPosition(null);
-      // 증거금만 잃음 — 잔고(balance)는 그대로 유지. 잔고가 실질적으로 0일 때만 리필 모달.
-      setBalance((b) => {
-        const newB = b; // margin은 진입 시 이미 차감되어 있으므로 추가 차감 없음
-        if (newB < 0.01) setLiquidated(true);
-        return newB;
-      });
+      setFlashLiquidation(true);
+      setTimeout(() => setFlashLiquidation(false), 500);
     }
   }, [price, position, liqPrice]);
 
@@ -554,8 +563,7 @@ export default function App() {
   };
 
   const instantRefill = () => {
-    setBalance(START_BALANCE_USDOG);
-    setLiquidated(false);
+    setBalance((b) => b + START_BALANCE_USDOG);
     pushLog("🎁 코인 리필 · 1000 USDOG 지급", "neutral");
   };
 
@@ -705,9 +713,18 @@ export default function App() {
 
       <div className="flex items-center justify-between px-3 py-2.5 bg-gradient-to-r from-[#12141b] to-[#0a0d12] border-b border-[#1a1f2b] text-[11px]">
         <span className="text-[#5b6472]">{t.myAssets}</span>
-        <div className="text-right">
-          <div className="font-mono font-bold text-[#e8b339] text-[13px]">{totalEquityUsdog.toFixed(2)} USDOG</div>
-          <div className="font-mono text-[#5b6472] text-[10px]">≈ ₩{Math.round(totalEquityKrw).toLocaleString()} · {t.cash} {balance.toFixed(2)} USDOG · {t.holding} {sogHolding.toFixed(2)} SOG</div>
+        <div className="flex items-center gap-2">
+          <div className="text-right">
+            <div className="font-mono font-bold text-[#e8b339] text-[13px]">{totalEquityUsdog.toFixed(2)} USDOG</div>
+            <div className="font-mono text-[#5b6472] text-[10px]">≈ ₩{Math.round(totalEquityKrw).toLocaleString()} · {t.cash} {balance.toFixed(2)} USDOG · {t.holding} {sogHolding.toFixed(2)} SOG</div>
+          </div>
+          <button
+            onClick={instantRefill}
+            title={t.refillButton}
+            className="flex items-center gap-1 bg-[#131722] hover:bg-[#1a1f2b] border border-[#1a1f2b] text-[#e8b339] text-[10px] font-semibold px-2 py-1.5 rounded-lg whitespace-nowrap active:scale-95 transition-transform"
+          >
+            <Play size={11} /> +1000
+          </button>
         </div>
       </div>
 
@@ -741,6 +758,7 @@ export default function App() {
         </div>
       </div>
       {drawMode && <div className="px-3 py-1 text-[10px] text-[#e8b339] bg-[#1a1206]">{t.drawHint}</div>}
+      {!drawMode && <div className="px-3 py-1 text-[9px] text-[#3a4658]">🖱️ 휠: 좌우 확대 · Shift+휠: 세로 확대</div>}
       {!drawMode && !autoFollow.current && (
         <div className="px-3 py-1 text-[10px] text-[#5b6472] bg-[#0d1117] flex justify-between items-center">
           <span>{t.viewingPast}</span>
@@ -749,7 +767,7 @@ export default function App() {
       )}
 
       <div className="border-b border-[#131722]" style={{ height: 400 }}>
-        <TradingChart allCandles={candles} liqPrice={liqPrice} entryPrice={position?.entry} drawings={drawings} onAddPoint={handleAddPoint} drawMode={drawMode} viewStart={viewStart} viewCount={viewCount} onPan={handlePan} vZoom={vZoom} />
+        <TradingChart allCandles={candles} liqPrice={liqPrice} entryPrice={position?.entry} drawings={drawings} onAddPoint={handleAddPoint} drawMode={drawMode} viewStart={viewStart} viewCount={viewCount} onPan={handlePan} vZoom={vZoom} onZoomH={(dir) => (dir > 0 ? zoomIn() : zoomOut())} onZoomV={(dir) => (dir > 0 ? vZoomIn() : vZoomOut())} />
       </div>
       <div className="border-b border-[#131722]" style={{ height: 60 }}><VolumePanel allCandles={candles} viewStart={viewStart} viewCount={viewCount} /></div>
       <div className="border-b border-[#131722]" style={{ height: 90 }}><RsiPanel allCandles={candles} viewStart={viewStart} viewCount={viewCount} /></div>
@@ -787,13 +805,21 @@ export default function App() {
           <span>{t.convertHolding}: {convertMode === "toSog" ? `${balance.toFixed(2)} USDOG` : `${sogHolding.toFixed(2)} SOG`}</span>
           <span>{t.convertPrice} {price.toFixed(6)}</span>
         </div>
-        <input
-          type="number"
-          value={convertInput}
-          onChange={(e) => setConvertInput(e.target.value)}
-          placeholder={convertMode === "toSog" ? t.convertPlaceholderSog : t.convertPlaceholderUsdog}
-          className="w-full bg-[#131722] border border-[#1a1f2b] rounded px-3 py-2 text-sm font-mono focus:outline-none focus:border-[#3a4658] mb-2"
-        />
+        <div className="flex gap-2 mb-2">
+          <input
+            type="number"
+            value={convertInput}
+            onChange={(e) => setConvertInput(e.target.value)}
+            placeholder={convertMode === "toSog" ? t.convertPlaceholderSog : t.convertPlaceholderUsdog}
+            className="flex-1 bg-[#131722] border border-[#1a1f2b] rounded px-3 py-2 text-sm font-mono focus:outline-none focus:border-[#3a4658]"
+          />
+          <button
+            onClick={() => setConvertInput(String(convertMode === "toSog" ? balance : sogHolding))}
+            className="px-3 rounded bg-[#131722] hover:bg-[#1a1f2b] text-[#e8b339] text-xs font-bold border border-[#1a1f2b]"
+          >
+            MAX
+          </button>
+        </div>
         {convertAmount > 0 && (
           <div className="text-[10.5px] text-[#8b96a5] mb-2 font-mono">
             {t.convertReceive}: <span className="text-[#e8b339] font-bold">{convertPreview.toFixed(4)} {convertMode === "toSog" ? "SOG" : "USDOG"}</span>
@@ -996,17 +1022,9 @@ export default function App() {
         </div>
       )}
 
-      {liquidated && (
-        <div className="fixed inset-0 bg-black/85 flex items-center justify-center p-4 z-50">
-          <div className="bg-[#0d1117] border border-[#f6465d]/40 rounded-xl p-6 max-w-xs w-full text-center">
-            <div className="w-14 h-14 mx-auto rounded-full overflow-hidden mb-3"><img src={USDOG_LOGO} alt="USDOG" className="w-full h-full object-cover" /></div>
-            <div className="text-base font-bold text-[#f6465d] mb-1">{t.liquidatedTitle}</div>
-            <div className="text-[11px] text-[#5b6472] mb-5">{t.liquidatedDesc1}<br/><span className="text-[#3a4658]">{t.liquidatedDesc2}</span></div>
-            <button onClick={instantRefill} className="w-full bg-[#e8b339] hover:bg-[#f0c257] text-black font-bold py-3 rounded-lg flex items-center justify-center gap-2 active:scale-95 transition-transform">
-              <Play size={16} /> {t.refillButton}
-            </button>
-          </div>
-        </div>
+      {/* 청산 시 조용히 붉은 플래시만 (모달 없음, 공포감 유지) */}
+      {flashLiquidation && (
+        <div className="fixed inset-0 bg-[#f6465d] opacity-20 pointer-events-none z-40 animate-pulse" />
       )}
     </div>
   );
