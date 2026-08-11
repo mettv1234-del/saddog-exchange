@@ -87,6 +87,35 @@ function useEngine(orderFlowRef, difficulty) {
   return { candles, eventLabel };
 }
 
+// ============ USDOG 페그 엔진 (0.9998 ~ 1.0001 USD 사이 미세 변동) ============
+const PEG_MIN = 0.9998;
+const PEG_MAX = 1.0001;
+function usePegEngine() {
+  const [pegHistory, setPegHistory] = useState(() =>
+    Array.from({ length: 120 }, () => ({ o: 1, h: 1.00005, l: 0.99995, c: 1 }))
+  );
+  const pRef = useRef({ price: 1.0 });
+  useEffect(() => {
+    const id = setInterval(() => {
+      const p = pRef.current;
+      const meanReversion = (1.0 - p.price) * 0.15; // 1.0으로 회귀하려는 힘
+      const noise = (Math.random() - 0.5) * 0.00025;
+      let next = p.price + meanReversion + noise;
+      next = Math.min(PEG_MAX, Math.max(PEG_MIN, next));
+      const open = p.price;
+      p.price = next;
+      setPegHistory((prev) => [...prev.slice(1), {
+        o: open,
+        h: Math.max(open, next) + Math.random() * 0.00003,
+        l: Math.min(open, next) - Math.random() * 0.00003,
+        c: next,
+      }]);
+    }, 1200);
+    return () => clearInterval(id);
+  }, []);
+  return pegHistory;
+}
+
 // ============ Indicators ============
 function sma(closes, period) {
   return closes.map((_, i) => {
@@ -143,7 +172,7 @@ function ichimoku(candles) {
 }
 
 // ============ Chart w/ pan + zoom ============
-function TradingChart({ allCandles, liqPrice, entryPrice, drawings, onAddPoint, drawMode, viewStart, viewCount, onPan }) {
+function TradingChart({ allCandles, liqPrice, entryPrice, drawings, onAddPoint, drawMode, viewStart, viewCount, onPan, vZoom }) {
   const w = 1000, h = 400, padL = 8, padR = 82, padT = 10, padB = 6;
   const candles = allCandles.slice(viewStart, viewStart + viewCount);
   const closes = allCandles.map((c) => c.c);
@@ -161,9 +190,14 @@ function TradingChart({ allCandles, liqPrice, entryPrice, drawings, onAddPoint, 
   ichi.spanB.forEach((v) => v != null && vals.push(v));
   if (liqPrice) vals.push(liqPrice);
   if (entryPrice) vals.push(entryPrice);
-  const max = Math.max(...vals) * 1.0004;
-  const min = Math.min(...vals) * 0.9996;
-  const range = max - min || 1;
+  const rawMax = Math.max(...vals) * 1.0004;
+  const rawMin = Math.min(...vals) * 0.9996;
+  const rawRange = rawMax - rawMin || 1;
+  const mid = (rawMax + rawMin) / 2;
+  // vZoom: 1 = 기본, >1일수록 세로로 확대(범위 축소)
+  const range = rawRange / (vZoom || 1);
+  const max = mid + range / 2;
+  const min = mid - range / 2;
   const y = (v) => padT + (h - padT - padB) - ((v - min) / range) * (h - padT - padB);
   const x = (i) => padL + (i / (candles.length - 1)) * (w - padL - padR);
   const cw = (w - padL - padR) / candles.length;
@@ -197,14 +231,25 @@ function TradingChart({ allCandles, liqPrice, entryPrice, drawings, onAddPoint, 
   };
   const handlePointerUp = () => { dragRef.current = null; };
 
+  // 클릭 좌표 → 데이터 좌표(절대 캔들 인덱스 + 가격)로 변환해 저장 (뷰가 바뀌어도 안전)
   const handleClick = (e) => {
     if (!drawMode) return;
     const svg = svgRef.current;
     const rect = svg.getBoundingClientRect();
     const px = ((e.clientX - rect.left) / rect.width) * w;
     const py = ((e.clientY - rect.top) / rect.height) * h;
+    const localIdx = ((px - padL) / (w - padL - padR)) * (candles.length - 1);
+    const absoluteIdx = viewStart + localIdx;
     const priceVal = min + ((h - padT - padB - (py - padT)) / (h - padT - padB)) * range;
-    onAddPoint({ x: px, priceVal });
+    if (!isFinite(absoluteIdx) || !isFinite(priceVal)) return;
+    onAddPoint({ idx: absoluteIdx, priceVal });
+  };
+
+  // 데이터 좌표 → 현재 뷰의 픽셀 x좌표로 변환 (범위 밖이면 null)
+  const idxToX = (absoluteIdx) => {
+    const localIdx = absoluteIdx - viewStart;
+    if (candles.length <= 1) return null;
+    return padL + (localIdx / (candles.length - 1)) * (w - padL - padR);
   };
 
   return (
@@ -263,11 +308,49 @@ function TradingChart({ allCandles, liqPrice, entryPrice, drawings, onAddPoint, 
           </g>
         );
       })}
-      {drawings.map((d, i) => (
-        <line key={i} x1={d.p1.x} y1={y(d.p1.priceVal)} x2={d.p2 ? d.p2.x : d.p1.x} y2={d.p2 ? y(d.p2.priceVal) : y(d.p1.priceVal)} stroke="#ffd166" strokeWidth="1.5" />
-      ))}
+      {drawings.map((d, i) => {
+        const x1 = idxToX(d.p1.idx);
+        const x2 = idxToX((d.p2 || d.p1).idx);
+        if (x1 == null || x2 == null) return null;
+        return (
+          <line key={i} x1={x1} y1={y(d.p1.priceVal)} x2={x2} y2={y((d.p2 || d.p1).priceVal)} stroke="#ffd166" strokeWidth="1.5" />
+        );
+      })}
       <rect x={w - padR} y={y(last.c) - 9} width={padR} height={18} fill={last.c >= last.o ? "#f6465d" : "#3b82f6"} />
       <text x={w - padR + 4} y={y(last.c) + 4} fill="#fff" fontSize="10.5" fontFamily="monospace" fontWeight="bold">{last.c.toFixed(6).slice(0, 8)}</text>
+    </svg>
+  );
+}
+
+// ============ USDOG/USD 페그 미니 차트 (정보용, 거래 불가) ============
+function PegChart({ pegHistory }) {
+  const w = 1000, h = 70, padL = 8, padR = 60, padT = 8, padB = 8;
+  const vals = [];
+  pegHistory.forEach((c) => vals.push(c.h, c.l));
+  vals.push(PEG_MIN, PEG_MAX);
+  const max = Math.max(...vals);
+  const min = Math.min(...vals);
+  const range = max - min || 0.0001;
+  const y = (v) => padT + (h - padT - padB) - ((v - min) / range) * (h - padT - padB);
+  const x = (i) => padL + (i / (pegHistory.length - 1)) * (w - padL - padR);
+  const cw = (w - padL - padR) / pegHistory.length;
+  const last = pegHistory[pegHistory.length - 1];
+  return (
+    <svg viewBox={`0 0 ${w} ${h}`} className="w-full h-full" preserveAspectRatio="none">
+      <rect width={w} height={h} fill="#000" />
+      <line x1={padL} x2={w - padR} y1={y(1.0)} y2={y(1.0)} stroke="#2a3040" strokeWidth="1" strokeDasharray="3 2" />
+      {pegHistory.map((c, i) => {
+        const up = c.c >= c.o;
+        const color = up ? "#f6465d" : "#3b82f6";
+        return (
+          <g key={i}>
+            <line x1={x(i)} x2={x(i)} y1={y(c.h)} y2={y(c.l)} stroke={color} strokeWidth="1" />
+            <rect x={x(i) - cw * 0.32} y={Math.min(y(c.o), y(c.c))} width={cw * 0.64} height={Math.max(1, Math.abs(y(c.o) - y(c.c)))} fill={color} />
+          </g>
+        );
+      })}
+      <rect x={w - padR} y={y(last.c) - 8} width={padR} height={16} fill={last.c >= 1 ? "#f6465d" : "#3b82f6"} />
+      <text x={w - padR + 4} y={y(last.c) + 4} fill="#fff" fontSize="9.5" fontFamily="monospace" fontWeight="bold">{last.c.toFixed(4)}</text>
     </svg>
   );
 }
@@ -358,6 +441,8 @@ export default function App() {
   const orderFlowRef = useRef({ pending: 0 });
   const [difficulty, setDifficulty] = useState("normal");
   const { candles, eventLabel } = useEngine(orderFlowRef, difficulty);
+  const pegHistory = usePegEngine();
+  const pegRate = pegHistory[pegHistory.length - 1].c; // 1 USDOG = pegRate USD
   const price = candles[candles.length - 1].c;
   const openPrice = candles[0].o;
   const changePct = ((price - openPrice) / openPrice) * 100;
@@ -365,6 +450,7 @@ export default function App() {
   const [loggedIn, setLoggedIn] = useState(false);
 
   const [balance, setBalance] = useState(START_BALANCE_USDOG);
+  const [sogHolding, setSogHolding] = useState(0); // 보유 SOG 현물 (포지션과 별개, 레버리지 없음)
   const [position, setPosition] = useState(null); // {side, size, entry, leverage, margin, mode}
   const [leverage, setLeverage] = useState(12.5);
   const [marginMode, setMarginMode] = useState("cross"); // "cross" | "isolated"
@@ -381,6 +467,7 @@ export default function App() {
 
   // chart view window (pan/zoom)
   const [viewCount, setViewCount] = useState(VISIBLE_CANDLES_DEFAULT);
+  const [vZoom, setVZoom] = useState(1); // 세로(가격) 확대 배율
   const [viewStart, setViewStart] = useState(MAX_HISTORY - VISIBLE_CANDLES_DEFAULT);
   const autoFollow = useRef(true);
 
@@ -397,6 +484,8 @@ export default function App() {
   };
   const zoomIn = () => setViewCount((v) => Math.max(20, v - 15));
   const zoomOut = () => setViewCount((v) => Math.min(MAX_HISTORY, v + 15));
+  const vZoomIn = () => setVZoom((v) => Math.min(6, +(v + 0.3).toFixed(2)));
+  const vZoomOut = () => setVZoom((v) => Math.max(0.4, +(v - 0.3).toFixed(2)));
 
   const pushLog = (msg, tone) => setLog((l) => [{ msg, tone, id: Date.now() + Math.random() }, ...l.slice(0, 19)]);
 
@@ -425,7 +514,7 @@ export default function App() {
   }, [price, position, liqPrice]);
 
   const margin = Number(marginInput) || 0;
-  const totalEquityUsdog = balance + (position ? position.margin + pnl : 0);
+  const totalEquityUsdog = balance + (position ? position.margin + pnl : 0) + sogHolding * price;
   const totalEquityKrw = totalEquityUsdog * KRW_PER_USDOG;
 
   const openPosition = (side) => {
@@ -463,6 +552,31 @@ export default function App() {
     setBalance(START_BALANCE_USDOG);
     setLiquidated(false);
     pushLog("🎁 코인 리필 · 1000 USDOG 지급", "neutral");
+  };
+
+  // ============ SOG ↔ USDOG 컨버트 (현재 시세 기준) ============
+  const [convertMode, setConvertMode] = useState("toSog"); // "toSog" | "toUsdog"
+  const [convertInput, setConvertInput] = useState("");
+  const convertAmount = Number(convertInput) || 0;
+
+  const convertPreview = convertMode === "toSog"
+    ? convertAmount / price // USDOG → 받을 SOG
+    : convertAmount * price; // SOG → 받을 USDOG
+
+  const doConvert = () => {
+    if (convertAmount <= 0) return;
+    if (convertMode === "toSog") {
+      if (convertAmount > balance) return;
+      setBalance((b) => b - convertAmount);
+      setSogHolding((s) => s + convertAmount / price);
+      pushLog(`🔄 환전 · ${convertAmount.toFixed(2)} USDOG → ${(convertAmount / price).toFixed(2)} SOG`, "neutral");
+    } else {
+      if (convertAmount > sogHolding) return;
+      setSogHolding((s) => s - convertAmount);
+      setBalance((b) => b + convertAmount * price);
+      pushLog(`🔄 환전 · ${convertAmount.toFixed(2)} SOG → ${(convertAmount * price).toFixed(2)} USDOG`, "neutral");
+    }
+    setConvertInput("");
   };
 
   const handleAddPoint = (pt) => {
@@ -534,7 +648,7 @@ export default function App() {
         <span className="text-[#5b6472]">내 자산</span>
         <div className="text-right">
           <div className="font-mono font-bold text-[#e8b339] text-[13px]">{totalEquityUsdog.toFixed(2)} USDOG</div>
-          <div className="font-mono text-[#5b6472] text-[10px]">≈ ₩{Math.round(totalEquityKrw).toLocaleString()}</div>
+          <div className="font-mono text-[#5b6472] text-[10px]">≈ ₩{Math.round(totalEquityKrw).toLocaleString()} · 현금 {balance.toFixed(2)} USDOG · 보유 {sogHolding.toFixed(2)} SOG</div>
         </div>
       </div>
 
@@ -554,10 +668,14 @@ export default function App() {
           <span className="text-[#e07a4a]">기준선</span>
           <span className="text-[#3ea36b]">구름</span>
         </div>
-        <div className="flex gap-1">
+        <div className="flex gap-1 items-center">
+          <span className="text-[9px] text-[#3a4658] mr-0.5">좌우</span>
           <button onClick={zoomIn} className="p-1.5 rounded bg-[#131722] text-[#5b6472] hover:text-white"><ZoomIn size={13} /></button>
           <button onClick={zoomOut} className="p-1.5 rounded bg-[#131722] text-[#5b6472] hover:text-white"><ZoomOut size={13} /></button>
-          <button onClick={() => { setDrawMode((d) => !d); pendingPoint.current = null; }} className={`p-1.5 rounded ${drawMode ? "bg-[#e8b339] text-black" : "bg-[#131722] text-[#5b6472]"}`}><Pencil size={13} /></button>
+          <span className="text-[9px] text-[#3a4658] mx-0.5">세로</span>
+          <button onClick={vZoomIn} className="p-1.5 rounded bg-[#131722] text-[#5b6472] hover:text-white rotate-90"><ZoomIn size={13} /></button>
+          <button onClick={vZoomOut} className="p-1.5 rounded bg-[#131722] text-[#5b6472] hover:text-white rotate-90"><ZoomOut size={13} /></button>
+          <button onClick={() => { setDrawMode((d) => !d); pendingPoint.current = null; }} className={`p-1.5 rounded ml-1 ${drawMode ? "bg-[#e8b339] text-black" : "bg-[#131722] text-[#5b6472]"}`}><Pencil size={13} /></button>
           <button onClick={() => setDrawings([])} className="p-1.5 rounded bg-[#131722] text-[#5b6472]"><Trash2 size={13} /></button>
         </div>
       </div>
@@ -570,10 +688,59 @@ export default function App() {
       )}
 
       <div className="border-b border-[#131722]" style={{ height: 400 }}>
-        <TradingChart allCandles={candles} liqPrice={liqPrice} entryPrice={position?.entry} drawings={drawings} onAddPoint={handleAddPoint} drawMode={drawMode} viewStart={viewStart} viewCount={viewCount} onPan={handlePan} />
+        <TradingChart allCandles={candles} liqPrice={liqPrice} entryPrice={position?.entry} drawings={drawings} onAddPoint={handleAddPoint} drawMode={drawMode} viewStart={viewStart} viewCount={viewCount} onPan={handlePan} vZoom={vZoom} />
       </div>
       <div className="border-b border-[#131722]" style={{ height: 60 }}><VolumePanel allCandles={candles} viewStart={viewStart} viewCount={viewCount} /></div>
       <div className="border-b border-[#131722]" style={{ height: 90 }}><RsiPanel allCandles={candles} viewStart={viewStart} viewCount={viewCount} /></div>
+
+      {/* USDOG/USD 페그 차트 — 정보용, 거래 불가 */}
+      <div className="px-3 pt-3 pb-1 flex items-center justify-between">
+        <span className="text-[10.5px] font-semibold text-[#8b96a5]">USDOG / USD 페그</span>
+        <span className="text-[9px] text-[#3a4658]">정보 제공용 · 거래 불가</span>
+      </div>
+      <div className="border-b border-[#131722]" style={{ height: 70 }}><PegChart pegHistory={pegHistory} /></div>
+
+      {/* SOG ↔ USDOG 컨버트 */}
+      <div className="mx-3 mt-3 rounded-xl border border-[#1a1f2b] p-3">
+        <div className="text-[11px] font-semibold text-[#8b96a5] mb-2">SOG ↔ USDOG 환전</div>
+        <div className="flex rounded-lg overflow-hidden border border-[#1a1f2b] mb-2 text-[11px] font-semibold">
+          <button
+            onClick={() => setConvertMode("toSog")}
+            className={`flex-1 py-1.5 ${convertMode === "toSog" ? "bg-[#e8b339] text-black" : "bg-[#131722] text-[#5b6472]"}`}
+          >
+            USDOG → SOG
+          </button>
+          <button
+            onClick={() => setConvertMode("toUsdog")}
+            className={`flex-1 py-1.5 ${convertMode === "toUsdog" ? "bg-[#e8b339] text-black" : "bg-[#131722] text-[#5b6472]"}`}
+          >
+            SOG → USDOG
+          </button>
+        </div>
+        <div className="text-[10px] text-[#5b6472] flex justify-between mb-1.5">
+          <span>보유: {convertMode === "toSog" ? `${balance.toFixed(2)} USDOG` : `${sogHolding.toFixed(2)} SOG`}</span>
+          <span>현재가 {price.toFixed(6)}</span>
+        </div>
+        <input
+          type="number"
+          value={convertInput}
+          onChange={(e) => setConvertInput(e.target.value)}
+          placeholder={convertMode === "toSog" ? "USDOG 수량" : "SOG 수량"}
+          className="w-full bg-[#131722] border border-[#1a1f2b] rounded px-3 py-2 text-sm font-mono focus:outline-none focus:border-[#3a4658] mb-2"
+        />
+        {convertAmount > 0 && (
+          <div className="text-[10.5px] text-[#8b96a5] mb-2 font-mono">
+            받는 수량: <span className="text-[#e8b339] font-bold">{convertPreview.toFixed(4)} {convertMode === "toSog" ? "SOG" : "USDOG"}</span>
+          </div>
+        )}
+        <button
+          onClick={doConvert}
+          disabled={convertAmount <= 0 || (convertMode === "toSog" ? convertAmount > balance : convertAmount > sogHolding)}
+          className="w-full bg-[#e8b339] hover:bg-[#f0c257] disabled:opacity-30 disabled:cursor-not-allowed text-black font-bold py-2.5 rounded-lg text-sm"
+        >
+          환전하기
+        </button>
+      </div>
 
       {/* Order entry + book */}
       <div className="grid grid-cols-5 gap-0 border-b border-[#131722]">
@@ -714,14 +881,42 @@ export default function App() {
         <div className="fixed inset-0 bg-black/85 flex items-center justify-center p-4 z-50" onClick={() => setShowInfo(false)}>
           <div className="bg-[#0d1117] border border-[#1a1f2b] rounded-xl p-5 max-w-sm w-full" onClick={(e) => e.stopPropagation()}>
             <div className="font-bold text-base mb-3">SOG 시장 정보</div>
-            <div className="space-y-2 text-[12px] font-mono">
+            <div className="space-y-3 text-[12px] font-mono">
               <div className="flex justify-between"><span className="text-[#5b6472]">총발행량</span><span>100,000,000,000,000 SOG</span></div>
-              <div className="flex justify-between"><span className="text-[#5b6472]">예치 준비금</span><span>1,000,000,000,000 USDOG</span></div>
-              <div className="flex justify-between"><span className="text-[#5b6472]">시작 가격</span><span>{START_PRICE.toFixed(6)} USDOG</span></div>
-              <div className="flex justify-between"><span className="text-[#5b6472]">현재 가격</span><span className="text-[#e8b339]">{price.toFixed(6)} USDOG</span></div>
-              <div className="flex justify-between"><span className="text-[#5b6472]">현재 시가총액</span><span>{(price * SOG_TOTAL_SUPPLY).toLocaleString(undefined, { maximumFractionDigits: 0 })} USDOG</span></div>
+
+              <div>
+                <div className="flex justify-between"><span className="text-[#5b6472]">예치 준비금</span><span>{USDOG_POOL.toLocaleString()} USDOG</span></div>
+                <div className="flex justify-between text-[10px] text-[#5b6472] mt-0.5">
+                  <span></span>
+                  <span>≈ ${USDOG_POOL.toLocaleString()} USD · ₩{Math.round(USDOG_POOL * KRW_PER_USDOG).toLocaleString()} KRW</span>
+                </div>
+              </div>
+
+              <div>
+                <div className="flex justify-between"><span className="text-[#5b6472]">시작 가격</span><span>{START_PRICE.toFixed(6)} USDOG</span></div>
+                <div className="flex justify-between text-[10px] text-[#5b6472] mt-0.5">
+                  <span></span>
+                  <span>≈ ${START_PRICE.toFixed(6)} USD · ₩{(START_PRICE * KRW_PER_USDOG).toFixed(2)} KRW</span>
+                </div>
+              </div>
+
+              <div>
+                <div className="flex justify-between"><span className="text-[#5b6472]">현재 가격</span><span className="text-[#e8b339]">{price.toFixed(6)} USDOG</span></div>
+                <div className="flex justify-between text-[10px] text-[#5b6472] mt-0.5">
+                  <span></span>
+                  <span>≈ ${price.toFixed(6)} USD · ₩{(price * KRW_PER_USDOG).toFixed(2)} KRW</span>
+                </div>
+              </div>
+
+              <div>
+                <div className="flex justify-between"><span className="text-[#5b6472]">현재 시가총액</span><span>{(price * SOG_TOTAL_SUPPLY).toLocaleString(undefined, { maximumFractionDigits: 0 })} USDOG</span></div>
+                <div className="flex justify-between text-[10px] text-[#5b6472] mt-0.5">
+                  <span></span>
+                  <span>≈ ${(price * SOG_TOTAL_SUPPLY).toLocaleString(undefined, { maximumFractionDigits: 0 })} USD · ₩{Math.round(price * SOG_TOTAL_SUPPLY * KRW_PER_USDOG).toLocaleString()} KRW</span>
+                </div>
+              </div>
             </div>
-            <div className="text-[10px] text-[#5b6472] mt-4 leading-relaxed">시총 = 현재가 × 총발행량. 시작 시총은 예치 준비금(1조 USDOG)과 동일합니다.</div>
+            <div className="text-[10px] text-[#5b6472] mt-4 leading-relaxed">시총 = 현재가 × 총발행량. 시작 시총은 예치 준비금(1조 USDOG)과 동일합니다. USDOG는 1달러 페그 스테이블코인이라 USD 금액과 동일합니다.</div>
             <button onClick={() => setShowInfo(false)} className="w-full mt-4 bg-[#131722] py-2 rounded text-xs">닫기</button>
           </div>
         </div>
