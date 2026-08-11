@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useMemo } from "react";
 import { ChevronDown, Play, X, Pencil, Trash2, LogIn, TrendingUp, TrendingDown, ZoomIn, ZoomOut } from "lucide-react";
+import { USDOG_LOGO, SOG_LOGO } from "./logos.js";
 
 const TICK_MS = 500;
 const MAX_HISTORY = 400;
@@ -327,7 +328,12 @@ function OrderBook({ price }) {
   const maxQty = Math.max(...asks.map((a) => a.qty), ...bids.map((b) => b.qty));
   return (
     <div className="text-[11px] font-mono">
-      <div className="flex justify-between text-[#5b6472] px-1 pb-1"><span>Price (USDOG)</span><span>Quantity (SOG)</span></div>
+      <div className="flex justify-between items-center text-[#5b6472] px-1 pb-1">
+        <span className="flex items-center gap-1">
+          <img src={SOG_LOGO} alt="SOG" className="w-3.5 h-3.5 rounded-full object-cover" /> Price (USDOG)
+        </span>
+        <span>Quantity (SOG)</span>
+      </div>
       {asks.map((a, i) => (
         <div key={i} className="relative flex justify-between px-1 py-[3px]">
           <div className="absolute right-0 top-0 h-full bg-[#3a1219]" style={{ width: `${(a.qty / maxQty) * 100}%` }} />
@@ -404,15 +410,19 @@ export default function App() {
   const pnlPct = position ? (pnl / position.margin) * 100 : 0;
 
   useEffect(() => {
-    if (!position || liquidated) return;
+    if (!position) return;
     const hit = position.side === "long" ? price <= liqPrice : price >= liqPrice;
     if (hit) {
-      pushLog(`💥 청산 · ${position.side.toUpperCase()} ${position.leverage}x (${position.mode === "isolated" ? "격리" : "교차"})`, "bad");
-      setLiquidated(true);
+      pushLog(`💥 청산 · ${position.side.toUpperCase()} ${position.leverage}x (${position.mode === "isolated" ? "격리" : "교차"}) · 증거금 ${position.margin.toFixed(2)} USDOG 손실`, "bad");
       setPosition(null);
-      setBalance(0);
+      // 증거금만 잃음 — 잔고(balance)는 그대로 유지. 잔고가 실질적으로 0일 때만 리필 모달.
+      setBalance((b) => {
+        const newB = b; // margin은 진입 시 이미 차감되어 있으므로 추가 차감 없음
+        if (newB < 0.01) setLiquidated(true);
+        return newB;
+      });
     }
-  }, [price, position, liqPrice, liquidated]);
+  }, [price, position, liqPrice]);
 
   const margin = Number(marginInput) || 0;
   const totalEquityUsdog = balance + (position ? position.margin + pnl : 0);
@@ -428,6 +438,17 @@ export default function App() {
     setMarginInput("");
     setClickFx(side);
     setTimeout(() => setClickFx(null), 250);
+  };
+
+  // 불타기(추가 증거금 투입) — 교차 모드에서만 허용
+  const [addMarginInput, setAddMarginInput] = useState("");
+  const addMargin = () => {
+    const amt = Number(addMarginInput) || 0;
+    if (!position || position.mode !== "cross" || amt <= 0 || amt > balance) return;
+    setBalance((b) => b - amt);
+    setPosition((p) => ({ ...p, margin: p.margin + amt }));
+    pushLog(`🔥 불타기 · 증거금 ${amt} USDOG 추가 (총 ${(position.margin + amt).toFixed(2)} USDOG)`, "neutral");
+    setAddMarginInput("");
   };
 
   const closePosition = () => {
@@ -457,7 +478,7 @@ export default function App() {
     return (
       <div className="min-h-screen bg-gradient-to-b from-[#0a0d14] to-black text-[#c9d1d9] flex items-center justify-center p-6">
         <div className="bg-[#0d1117] border border-[#1a1f2b] rounded-2xl p-8 max-w-xs w-full text-center shadow-[0_0_40px_rgba(246,70,93,0.08)]">
-          <div className="w-16 h-16 mx-auto rounded-full bg-gradient-to-br from-[#e8b339] to-[#f6465d] flex items-center justify-center text-3xl font-black mb-4">🐕</div>
+          <div className="w-16 h-16 mx-auto rounded-full overflow-hidden mb-4 shadow-lg"><img src={USDOG_LOGO} alt="USDOG" className="w-full h-full object-cover" /></div>
           <div className="font-bold text-lg mb-1">SADDOG Exchange</div>
           <div className="text-[11px] text-[#5b6472] mb-5">SOG / USDOG 모의투자</div>
 
@@ -499,7 +520,7 @@ export default function App() {
     <div className="min-h-screen bg-black text-[#c9d1d9] font-sans text-sm select-none pb-6">
       <div className="flex items-center justify-between px-3 py-2.5 border-b border-[#131722] bg-gradient-to-r from-[#0a0d14] to-black">
         <div className="flex items-center gap-1.5">
-          <div className="w-6 h-6 rounded-full bg-gradient-to-br from-[#e8b339] to-[#f6465d] flex items-center justify-center text-xs">🐕</div>
+          <div className="w-6 h-6 rounded-full overflow-hidden"><img src={SOG_LOGO} alt="SOG" className="w-full h-full object-cover" /></div>
           <span className="font-bold text-base">SOG/USDOG</span>
           <button onClick={() => setShowInfo(true)}><ChevronDown size={16} className="text-[#5b6472]" /></button>
           <span className="ml-1 text-[9px] px-1.5 py-0.5 rounded bg-[#131722] text-[#e8b339] font-semibold">{DIFFICULTY_PRESETS[difficulty]?.label}</span>
@@ -641,6 +662,31 @@ export default function App() {
             <span className="text-[#5b6472]">수익률</span>
             <span className={`font-mono font-bold ${pnlPct >= 0 ? "text-[#f6465d]" : "text-[#3b82f6]"}`}>{pnlPct >= 0 ? "+" : ""}{pnlPct.toFixed(1)}%</span>
           </div>
+          <div className="px-4 pb-3 flex justify-between text-[11px] font-mono">
+            <span className="text-[#5b6472]">증거금 / 청산가</span>
+            <span>{position.margin.toFixed(2)} USDOG · <span className="text-[#f6465d]">{liqPrice.toFixed(6)}</span></span>
+          </div>
+          {position.mode === "cross" && (
+            <div className="px-4 pb-4 pt-1 border-t border-[#1a1f2b] flex gap-2 items-center">
+              <input
+                type="number"
+                value={addMarginInput}
+                onChange={(e) => setAddMarginInput(e.target.value)}
+                placeholder="추가 증거금 (불타기)"
+                className="flex-1 bg-[#131722] border border-[#1a1f2b] rounded px-2.5 py-1.5 text-xs font-mono focus:outline-none focus:border-[#3a4658]"
+              />
+              <button
+                onClick={addMargin}
+                disabled={Number(addMarginInput) <= 0 || Number(addMarginInput) > balance}
+                className="bg-[#e8b339] hover:bg-[#f0c257] disabled:opacity-30 disabled:cursor-not-allowed text-black text-xs font-bold px-3 py-1.5 rounded whitespace-nowrap"
+              >
+                🔥 불타기
+              </button>
+            </div>
+          )}
+          {position.mode === "isolated" && (
+            <div className="px-4 pb-3 text-[9.5px] text-[#3a4658]">격리 모드는 추가 증거금 투입이 불가합니다. 청산 위험을 줄이려면 교차 모드를 사용하세요.</div>
+          )}
         </div>
       )}
 
@@ -684,7 +730,7 @@ export default function App() {
       {liquidated && (
         <div className="fixed inset-0 bg-black/85 flex items-center justify-center p-4 z-50">
           <div className="bg-[#0d1117] border border-[#f6465d]/40 rounded-xl p-6 max-w-xs w-full text-center">
-            <div className="text-4xl mb-2">💥</div>
+            <div className="w-14 h-14 mx-auto rounded-full overflow-hidden mb-3"><img src={USDOG_LOGO} alt="USDOG" className="w-full h-full object-cover" /></div>
             <div className="text-base font-bold text-[#f6465d] mb-1">청산되었습니다</div>
             <div className="text-[11px] text-[#5b6472] mb-5">아래 버튼을 눌러 1000 USDOG를 받고 다시 시작하세요.<br/><span className="text-[#3a4658]">(추후 이 버튼은 광고 시청 후 지급으로 변경됩니다)</span></div>
             <button onClick={instantRefill} className="w-full bg-[#e8b339] hover:bg-[#f0c257] text-black font-bold py-3 rounded-lg flex items-center justify-center gap-2 active:scale-95 transition-transform">
