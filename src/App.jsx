@@ -173,7 +173,7 @@ function ichimoku(candles) {
 }
 
 // ============ Chart w/ pan + zoom ============
-function TradingChart({ allCandles, liqPrice, entryPrice, drawings, onAddPoint, drawMode, viewStart, viewCount, onPan, vZoom, onZoomH, onZoomV }) {
+function TradingChart({ allCandles, liqPrice, entryPrice, drawings, onAddPoint, drawMode, viewStart, viewCount, onPan, vZoom, onZoomH, onZoomV, onSetViewCount }) {
   const w = 1000, h = 400, padL = 8, padR = 82, padT = 10, padB = 6;
   const candles = allCandles.slice(viewStart, viewStart + viewCount);
   const closes = allCandles.map((c) => c.c);
@@ -217,9 +217,11 @@ function TradingChart({ allCandles, liqPrice, entryPrice, drawings, onAddPoint, 
 
   const handlePointerDown = (e) => {
     if (drawMode) return;
+    if (e.pointerType === "touch") return; // 터치는 onTouchStart에서 별도 처리 (핀치 지원 위해)
     dragRef.current = { startX: e.clientX, startView: viewStart };
   };
   const handlePointerMove = (e) => {
+    if (e.pointerType === "touch") return;
     if (!dragRef.current) return;
     const svg = svgRef.current;
     const rect = svg.getBoundingClientRect();
@@ -240,6 +242,46 @@ function TradingChart({ allCandles, liqPrice, entryPrice, drawings, onAddPoint, 
     } else {
       onZoomH && onZoomH(e.deltaY < 0 ? 1 : -1);
     }
+  };
+
+  // 핀치 줌 (모바일 두 손가락) — 거리 변화로 좌우(캔들 개수) 확대/축소
+  const pinchRef = useRef(null);
+  const touchDist = (touches) => {
+    const dx = touches[0].clientX - touches[1].clientX;
+    const dy = touches[0].clientY - touches[1].clientY;
+    return Math.sqrt(dx * dx + dy * dy);
+  };
+  const handleTouchStart = (e) => {
+    if (drawMode) return;
+    if (e.touches.length === 2) {
+      pinchRef.current = { startDist: touchDist(e.touches), startCount: viewCount };
+      dragRef.current = null; // 팬 동작과 겹치지 않게
+    } else if (e.touches.length === 1) {
+      dragRef.current = { startX: e.touches[0].clientX, startView: viewStart };
+    }
+  };
+  const handleTouchMove = (e) => {
+    if (e.touches.length === 2 && pinchRef.current) {
+      e.preventDefault();
+      const dist = touchDist(e.touches);
+      const ratio = pinchRef.current.startDist / Math.max(1, dist); // 손가락 벌리면 ratio<1 → 확대(캔들 수 감소)
+      let newCount = Math.round(pinchRef.current.startCount * ratio);
+      newCount = Math.max(20, Math.min(MAX_HISTORY, newCount));
+      onSetViewCount && onSetViewCount(newCount);
+    } else if (e.touches.length === 1 && dragRef.current) {
+      const svg = svgRef.current;
+      const rect = svg.getBoundingClientRect();
+      const dxPixels = e.touches[0].clientX - dragRef.current.startX;
+      const dxData = (dxPixels / rect.width) * w;
+      const candleShift = Math.round(-dxData / cw);
+      let newStart = dragRef.current.startView + candleShift;
+      newStart = Math.max(0, Math.min(allCandles.length - viewCount, newStart));
+      onPan(newStart);
+    }
+  };
+  const handleTouchEnd = (e) => {
+    if (e.touches.length < 2) pinchRef.current = null;
+    if (e.touches.length === 0) dragRef.current = null;
   };
 
   // 클릭 좌표 → 데이터 좌표(절대 캔들 인덱스 + 가격)로 변환해 저장 (뷰가 바뀌어도 안전)
@@ -275,6 +317,9 @@ function TradingChart({ allCandles, liqPrice, entryPrice, drawings, onAddPoint, 
       onPointerUp={handlePointerUp}
       onPointerLeave={handlePointerUp}
       onWheel={handleWheel}
+      onTouchStart={handleTouchStart}
+      onTouchMove={handleTouchMove}
+      onTouchEnd={handleTouchEnd}
     >
       <defs>
         <linearGradient id="bgGrad" x1="0" y1="0" x2="0" y2="1">
@@ -785,7 +830,7 @@ export default function App() {
       )}
 
       <div className="border-b border-[#131722]" style={{ height: 400 }}>
-        <TradingChart allCandles={candles} liqPrice={liqPrice} entryPrice={position?.entry} drawings={drawings} onAddPoint={handleAddPoint} drawMode={drawMode} viewStart={viewStart} viewCount={viewCount} onPan={handlePan} vZoom={vZoom} onZoomH={(dir) => (dir > 0 ? zoomIn() : zoomOut())} onZoomV={(dir) => (dir > 0 ? vZoomIn() : vZoomOut())} />
+        <TradingChart allCandles={candles} liqPrice={liqPrice} entryPrice={position?.entry} drawings={drawings} onAddPoint={handleAddPoint} drawMode={drawMode} viewStart={viewStart} viewCount={viewCount} onPan={handlePan} vZoom={vZoom} onZoomH={(dir) => (dir > 0 ? zoomIn() : zoomOut())} onZoomV={(dir) => (dir > 0 ? vZoomIn() : vZoomOut())} onSetViewCount={setViewCount} />
       </div>
       <div className="border-b border-[#131722]" style={{ height: 60 }}><VolumePanel allCandles={candles} viewStart={viewStart} viewCount={viewCount} /></div>
       <div className="border-b border-[#131722]" style={{ height: 90 }}><RsiPanel allCandles={candles} viewStart={viewStart} viewCount={viewCount} /></div>
