@@ -12,7 +12,15 @@ const USDOG_POOL = 1_000_000_000_000;
 const START_PRICE = USDOG_POOL / SOG_TOTAL_SUPPLY; // 0.01
 
 // ============ Engine ============
-function useEngine(orderFlowRef) {
+// 난이도별: 변동성 배율, 유저 매매 영향력, 페이크아웃(역방향 유도) 확률
+const DIFFICULTY_PRESETS = {
+  easy:    { volMult: 0.6, userInfluence: 0.020, fakeoutChance: 0.00, label: "쉬움" },
+  normal:  { volMult: 1.0, userInfluence: 0.008, fakeoutChance: 0.05, label: "보통" },
+  hard:    { volMult: 1.6, userInfluence: 0.003, fakeoutChance: 0.15, label: "어려움" },
+  extreme: { volMult: 2.6, userInfluence: 0.0008, fakeoutChance: 0.30, label: "극한" },
+};
+
+function useEngine(orderFlowRef, difficulty) {
   const [candles, setCandles] = useState(() =>
     Array.from({ length: MAX_HISTORY }, (_, i) => ({
       o: START_PRICE, h: START_PRICE * 1.001, l: START_PRICE * 0.999, c: START_PRICE,
@@ -20,30 +28,53 @@ function useEngine(orderFlowRef) {
     }))
   );
   const [eventLabel, setEventLabel] = useState(null);
-  const sRef = useRef({ price: START_PRICE, momentum: 0, eventTicks: 0, eventDir: 0, tick: 0 });
+  const sRef = useRef({ price: START_PRICE, momentum: 0, eventTicks: 0, eventDir: 0, tick: 0, pendingFlow: [] });
+  const diffRef = useRef(difficulty);
+  diffRef.current = difficulty;
 
   useEffect(() => {
     const id = setInterval(() => {
       const s = sRef.current;
-      if (s.eventTicks <= 0 && Math.random() < 0.012) {
+      const preset = DIFFICULTY_PRESETS[diffRef.current] || DIFFICULTY_PRESETS.normal;
+
+      if (s.eventTicks <= 0 && Math.random() < 0.012 * preset.volMult) {
         s.eventTicks = 6 + Math.floor(Math.random() * 10);
         s.eventDir = Math.random() < 0.5 ? 1 : -1;
         setEventLabel(s.eventDir > 0 ? "🚀 대량 매수 유입" : "🔻 대량 매도 유입");
       }
-      let drift = (Math.random() - 0.5) * 0.006;
+
+      let drift = (Math.random() - 0.5) * 0.006 * preset.volMult;
+
+      // 유저 주문은 즉시 반영하지 않고 큐에 넣어 지연 후 노이즈와 함께 반영
       const flow = orderFlowRef.current;
-      drift += flow.pressure * 0.02;
-      flow.pressure *= 0.85;
+      if (flow.pending !== 0) {
+        const delay = 3 + Math.floor(Math.random() * 8);
+        s.pendingFlow.push({ ticksLeft: delay, amount: flow.pending * preset.userInfluence });
+        flow.pending = 0;
+      }
+      let queuedForce = 0;
+      s.pendingFlow = s.pendingFlow.filter((f) => {
+        f.ticksLeft -= 1;
+        if (f.ticksLeft <= 0) {
+          const flipped = Math.random() < preset.fakeoutChance ? -1 : 1;
+          queuedForce += f.amount * flipped * (0.5 + Math.random());
+          return false;
+        }
+        return true;
+      });
+      drift += queuedForce;
+
       if (s.eventTicks > 0) {
-        drift += s.eventDir * (0.01 + Math.random() * 0.015);
+        drift += s.eventDir * (0.01 + Math.random() * 0.015) * preset.volMult;
         s.eventTicks -= 1;
         if (s.eventTicks === 0) setEventLabel(null);
       }
+
       s.momentum = s.momentum * 0.7 + drift * 0.3;
       const open = s.price;
       let next = Math.max(0.0001, s.price * (1 + s.momentum + drift));
-      const high = Math.max(open, next) * (1 + Math.random() * 0.002);
-      const low = Math.min(open, next) * (1 - Math.random() * 0.002);
+      const high = Math.max(open, next) * (1 + Math.random() * 0.002 * preset.volMult);
+      const low = Math.min(open, next) * (1 - Math.random() * 0.002 * preset.volMult);
       const vol = 300 + Math.abs(drift) * 200000 + Math.random() * 700;
       s.price = next;
       s.tick += 1;
@@ -318,8 +349,9 @@ function OrderBook({ price }) {
 
 // ============ App ============
 export default function App() {
-  const orderFlowRef = useRef({ pressure: 0 });
-  const { candles, eventLabel } = useEngine(orderFlowRef);
+  const orderFlowRef = useRef({ pending: 0 });
+  const [difficulty, setDifficulty] = useState("normal");
+  const { candles, eventLabel } = useEngine(orderFlowRef, difficulty);
   const price = candles[candles.length - 1].c;
   const openPrice = candles[0].o;
   const changePct = ((price - openPrice) / openPrice) * 100;
@@ -391,7 +423,7 @@ export default function App() {
     const size = (margin * leverage) / price;
     setBalance((b) => b - margin);
     setPosition({ side, size, entry: price, leverage, margin, mode: marginMode });
-    orderFlowRef.current.pressure += side === "long" ? 0.4 : -0.4;
+    orderFlowRef.current.pending += side === "long" ? 1 : -1;
     pushLog(`${side === "long" ? "Long" : "Short"} 진입 · ${leverage}x · ${marginMode === "isolated" ? "격리" : "교차"} · ${margin} USDOG`, side === "long" ? "good" : "bad");
     setMarginInput("");
     setClickFx(side);
@@ -401,7 +433,7 @@ export default function App() {
   const closePosition = () => {
     if (!position) return;
     setBalance((b) => b + position.margin + pnl);
-    orderFlowRef.current.pressure += position.side === "long" ? -0.3 : 0.3;
+    orderFlowRef.current.pending += position.side === "long" ? -0.7 : 0.7;
     pushLog(`포지션 종료 · ${pnl >= 0 ? "+" : ""}${pnl.toFixed(2)} USDOG`, pnl >= 0 ? "good" : "bad");
     setPosition(null);
   };
@@ -427,7 +459,33 @@ export default function App() {
         <div className="bg-[#0d1117] border border-[#1a1f2b] rounded-2xl p-8 max-w-xs w-full text-center shadow-[0_0_40px_rgba(246,70,93,0.08)]">
           <div className="w-16 h-16 mx-auto rounded-full bg-gradient-to-br from-[#e8b339] to-[#f6465d] flex items-center justify-center text-3xl font-black mb-4">🐕</div>
           <div className="font-bold text-lg mb-1">SADDOG Exchange</div>
-          <div className="text-[11px] text-[#5b6472] mb-6">SOG / USDOG 모의투자</div>
+          <div className="text-[11px] text-[#5b6472] mb-5">SOG / USDOG 모의투자</div>
+
+          <div className="text-left mb-4">
+            <div className="text-[10px] text-[#5b6472] mb-2">난이도 선택</div>
+            <div className="grid grid-cols-2 gap-2">
+              {Object.entries(DIFFICULTY_PRESETS).map(([key, p]) => (
+                <button
+                  key={key}
+                  onClick={() => setDifficulty(key)}
+                  className={`py-2 rounded-lg text-xs font-semibold border transition-all ${
+                    difficulty === key
+                      ? "bg-[#e8b339] text-black border-[#e8b339]"
+                      : "bg-[#131722] text-[#8b96a5] border-[#1a1f2b] hover:border-[#3a4658]"
+                  }`}
+                >
+                  {p.label}
+                </button>
+              ))}
+            </div>
+            <div className="text-[9.5px] text-[#3a4658] mt-2 leading-relaxed">
+              {difficulty === "easy" && "변동성 낮음 · 내 매매가 가격에 잘 반영됨 (연습용)"}
+              {difficulty === "normal" && "변동성 보통 · 매매 영향은 지연되어 나타남"}
+              {difficulty === "hard" && "변동성 높음 · 내 매매 영향력 작음 · 가끔 역방향 유도"}
+              {difficulty === "extreme" && "극단적 변동성 · 내 매매 영향 거의 없음 · 페이크아웃 빈번"}
+            </div>
+          </div>
+
           <button onClick={() => setLoggedIn(true)} className="w-full bg-white text-black font-semibold py-2.5 rounded-lg flex items-center justify-center gap-2 hover:bg-gray-100 active:scale-[0.98] transition-transform">
             <LogIn size={16} /> Google로 계속하기
           </button>
@@ -444,6 +502,7 @@ export default function App() {
           <div className="w-6 h-6 rounded-full bg-gradient-to-br from-[#e8b339] to-[#f6465d] flex items-center justify-center text-xs">🐕</div>
           <span className="font-bold text-base">SOG/USDOG</span>
           <button onClick={() => setShowInfo(true)}><ChevronDown size={16} className="text-[#5b6472]" /></button>
+          <span className="ml-1 text-[9px] px-1.5 py-0.5 rounded bg-[#131722] text-[#e8b339] font-semibold">{DIFFICULTY_PRESETS[difficulty]?.label}</span>
         </div>
         <span className={`font-mono text-sm font-bold ${changePct >= 0 ? "text-[#f6465d]" : "text-[#3b82f6]"}`}>
           {changePct >= 0 ? "+" : ""}{changePct.toFixed(2)}%
