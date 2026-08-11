@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useMemo } from "react";
-import { ChevronDown, Play, X, Pencil, Trash2, LogIn, TrendingUp, TrendingDown, ZoomIn, ZoomOut } from "lucide-react";
+import { ChevronDown, Play, X, Pencil, Trash2, LogIn, TrendingUp, TrendingDown, ZoomIn, ZoomOut, Globe, DoorOpen } from "lucide-react";
 import { USDOG_LOGO, SOG_LOGO } from "./logos.js";
+import { useTranslation } from "./i18n.js";
 
 const TICK_MS = 500;
 const MAX_HISTORY = 400;
@@ -440,6 +441,8 @@ function OrderBook({ price }) {
 export default function App() {
   const orderFlowRef = useRef({ pending: 0 });
   const [difficulty, setDifficulty] = useState("normal");
+  const [lang, setLang] = useState("ko");
+  const t = useTranslation(lang);
   const { candles, eventLabel } = useEngine(orderFlowRef, difficulty);
   const pegHistory = usePegEngine();
   const pegRate = pegHistory[pegHistory.length - 1].c; // 1 USDOG = pegRate USD
@@ -448,6 +451,8 @@ export default function App() {
   const changePct = ((price - openPrice) / openPrice) * 100;
 
   const [loggedIn, setLoggedIn] = useState(false);
+  const [marketView, setMarketView] = useState("futures"); // "futures" (SOG/USDOG) | "spot" (USDOG/USD)
+  const [showMarketMenu, setShowMarketMenu] = useState(false);
 
   const [balance, setBalance] = useState(START_BALANCE_USDOG);
   const [sogHolding, setSogHolding] = useState(0); // 보유 SOG 현물 (포지션과 별개, 레버리지 없음)
@@ -592,12 +597,18 @@ export default function App() {
     return (
       <div className="min-h-screen bg-gradient-to-b from-[#0a0d14] to-black text-[#c9d1d9] flex items-center justify-center p-6">
         <div className="bg-[#0d1117] border border-[#1a1f2b] rounded-2xl p-8 max-w-xs w-full text-center shadow-[0_0_40px_rgba(246,70,93,0.08)]">
+          <div className="flex justify-end mb-2">
+            <div className="flex rounded-lg overflow-hidden border border-[#1a1f2b] text-[10px] font-semibold">
+              <button onClick={() => setLang("ko")} className={`px-2.5 py-1 ${lang === "ko" ? "bg-[#e8b339] text-black" : "bg-[#131722] text-[#5b6472]"}`}>한국어</button>
+              <button onClick={() => setLang("en")} className={`px-2.5 py-1 ${lang === "en" ? "bg-[#e8b339] text-black" : "bg-[#131722] text-[#5b6472]"}`}>English</button>
+            </div>
+          </div>
           <div className="w-16 h-16 mx-auto rounded-full overflow-hidden mb-4 shadow-lg"><img src={USDOG_LOGO} alt="USDOG" className="w-full h-full object-cover" /></div>
-          <div className="font-bold text-lg mb-1">SADDOG Exchange</div>
-          <div className="text-[11px] text-[#5b6472] mb-5">SOG / USDOG 모의투자</div>
+          <div className="font-bold text-lg mb-1">{t.appName}</div>
+          <div className="text-[11px] text-[#5b6472] mb-5">{t.tagline}</div>
 
           <div className="text-left mb-4">
-            <div className="text-[10px] text-[#5b6472] mb-2">난이도 선택</div>
+            <div className="text-[10px] text-[#5b6472] mb-2">{t.difficultyLabel}</div>
             <div className="grid grid-cols-2 gap-2">
               {Object.entries(DIFFICULTY_PRESETS).map(([key, p]) => (
                 <button
@@ -609,22 +620,19 @@ export default function App() {
                       : "bg-[#131722] text-[#8b96a5] border-[#1a1f2b] hover:border-[#3a4658]"
                   }`}
                 >
-                  {p.label}
+                  {t.difficulty[key]}
                 </button>
               ))}
             </div>
             <div className="text-[9.5px] text-[#3a4658] mt-2 leading-relaxed">
-              {difficulty === "easy" && "변동성 낮음 · 내 매매가 가격에 잘 반영됨 (연습용)"}
-              {difficulty === "normal" && "변동성 보통 · 매매 영향은 지연되어 나타남"}
-              {difficulty === "hard" && "변동성 높음 · 내 매매 영향력 작음 · 가끔 역방향 유도"}
-              {difficulty === "extreme" && "극단적 변동성 · 내 매매 영향 거의 없음 · 페이크아웃 빈번"}
+              {t.difficultyDesc[difficulty]}
             </div>
           </div>
 
           <button onClick={() => setLoggedIn(true)} className="w-full bg-white text-black font-semibold py-2.5 rounded-lg flex items-center justify-center gap-2 hover:bg-gray-100 active:scale-[0.98] transition-transform">
-            <LogIn size={16} /> Google로 계속하기
+            <LogIn size={16} /> {t.googleLogin}
           </button>
-          <div className="text-[9.5px] text-[#3a4658] mt-4 leading-relaxed">⚠ 데모 버전: 실제 구글 인증은 연결되어 있지 않습니다.</div>
+          <div className="text-[9.5px] text-[#3a4658] mt-4 leading-relaxed">{t.demoNotice}</div>
         </div>
       </div>
     );
@@ -632,23 +640,74 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-black text-[#c9d1d9] font-sans text-sm select-none pb-6">
-      <div className="flex items-center justify-between px-3 py-2.5 border-b border-[#131722] bg-gradient-to-r from-[#0a0d14] to-black">
+      <div className="flex items-center justify-between px-3 py-2.5 border-b border-[#131722] bg-gradient-to-r from-[#0a0d14] to-black relative">
         <div className="flex items-center gap-1.5">
-          <div className="w-6 h-6 rounded-full overflow-hidden"><img src={SOG_LOGO} alt="SOG" className="w-full h-full object-cover" /></div>
-          <span className="font-bold text-base">SOG/USDOG</span>
-          <button onClick={() => setShowInfo(true)}><ChevronDown size={16} className="text-[#5b6472]" /></button>
-          <span className="ml-1 text-[9px] px-1.5 py-0.5 rounded bg-[#131722] text-[#e8b339] font-semibold">{DIFFICULTY_PRESETS[difficulty]?.label}</span>
+          <div className="w-6 h-6 rounded-full overflow-hidden"><img src={marketView === "futures" ? SOG_LOGO : USDOG_LOGO} alt="logo" className="w-full h-full object-cover" /></div>
+          <button onClick={() => setShowMarketMenu((v) => !v)} className="flex items-center gap-1">
+            <span className="font-bold text-base">{marketView === "futures" ? "SOG/USDOG" : "USDOG/USD"}</span>
+            <ChevronDown size={16} className={`text-[#5b6472] transition-transform ${showMarketMenu ? "rotate-180" : ""}`} />
+          </button>
+          <span className="ml-1 text-[9px] px-1.5 py-0.5 rounded bg-[#131722] text-[#e8b339] font-semibold">{t.difficulty[difficulty]}</span>
         </div>
-        <span className={`font-mono text-sm font-bold ${changePct >= 0 ? "text-[#f6465d]" : "text-[#3b82f6]"}`}>
-          {changePct >= 0 ? "+" : ""}{changePct.toFixed(2)}%
-        </span>
+        {marketView === "futures" ? (
+          <span className={`font-mono text-sm font-bold ${changePct >= 0 ? "text-[#f6465d]" : "text-[#3b82f6]"}`}>
+            {changePct >= 0 ? "+" : ""}{changePct.toFixed(2)}%
+          </span>
+        ) : (
+          <span className="font-mono text-sm font-bold text-[#8b96a5]">{pegRate.toFixed(4)}</span>
+        )}
+
+        {showMarketMenu && (
+          <div className="absolute top-full left-3 mt-1 w-64 bg-[#0d1117] border border-[#1a1f2b] rounded-xl shadow-xl z-40 overflow-hidden">
+            <div className="px-3 py-2 text-[10px] text-[#5b6472] border-b border-[#1a1f2b]">{t.marketSelectTitle}</div>
+            <button
+              onClick={() => { setMarketView("futures"); setShowMarketMenu(false); }}
+              className={`w-full flex items-center gap-2 px-3 py-2.5 text-left hover:bg-[#131722] ${marketView === "futures" ? "bg-[#131722]" : ""}`}
+            >
+              <div className="w-7 h-7 rounded-full overflow-hidden flex-shrink-0"><img src={SOG_LOGO} className="w-full h-full object-cover" alt="" /></div>
+              <div>
+                <div className="text-sm font-semibold">SOG/USDOG</div>
+                <div className="text-[10px] text-[#5b6472]">{t.marketFutures}</div>
+              </div>
+            </button>
+            <button
+              onClick={() => { setMarketView("spot"); setShowMarketMenu(false); }}
+              className={`w-full flex items-center gap-2 px-3 py-2.5 text-left hover:bg-[#131722] ${marketView === "spot" ? "bg-[#131722]" : ""}`}
+            >
+              <div className="w-7 h-7 rounded-full overflow-hidden flex-shrink-0"><img src={USDOG_LOGO} className="w-full h-full object-cover" alt="" /></div>
+              <div>
+                <div className="text-sm font-semibold">USDOG/USD</div>
+                <div className="text-[10px] text-[#5b6472]">{t.marketSpot}</div>
+              </div>
+            </button>
+            <div className="border-t border-[#1a1f2b]">
+              <button
+                onClick={() => setShowInfo(true)}
+                className="w-full px-3 py-2.5 text-left text-xs text-[#8b96a5] hover:bg-[#131722]"
+              >
+                {t.marketInfoTitle}
+              </button>
+              <div className="px-3 py-2 flex items-center gap-1.5 text-[10px] text-[#5b6472]">
+                <Globe size={12} />
+                <button onClick={() => setLang("ko")} className={`px-2 py-0.5 rounded ${lang === "ko" ? "bg-[#e8b339] text-black" : "bg-[#131722]"}`}>한국어</button>
+                <button onClick={() => setLang("en")} className={`px-2 py-0.5 rounded ${lang === "en" ? "bg-[#e8b339] text-black" : "bg-[#131722]"}`}>English</button>
+              </div>
+              <button
+                onClick={() => { setShowMarketMenu(false); setLoggedIn(false); }}
+                className="w-full px-3 py-2.5 text-left text-xs text-[#f6465d] hover:bg-[#131722] flex items-center gap-1.5 border-t border-[#1a1f2b]"
+              >
+                <DoorOpen size={13} /> {t.exitToMenu}
+              </button>
+            </div>
+          </div>
+        )}
       </div>
 
       <div className="flex items-center justify-between px-3 py-2.5 bg-gradient-to-r from-[#12141b] to-[#0a0d12] border-b border-[#1a1f2b] text-[11px]">
-        <span className="text-[#5b6472]">내 자산</span>
+        <span className="text-[#5b6472]">{t.myAssets}</span>
         <div className="text-right">
           <div className="font-mono font-bold text-[#e8b339] text-[13px]">{totalEquityUsdog.toFixed(2)} USDOG</div>
-          <div className="font-mono text-[#5b6472] text-[10px]">≈ ₩{Math.round(totalEquityKrw).toLocaleString()} · 현금 {balance.toFixed(2)} USDOG · 보유 {sogHolding.toFixed(2)} SOG</div>
+          <div className="font-mono text-[#5b6472] text-[10px]">≈ ₩{Math.round(totalEquityKrw).toLocaleString()} · {t.cash} {balance.toFixed(2)} USDOG · {t.holding} {sogHolding.toFixed(2)} SOG</div>
         </div>
       </div>
 
@@ -658,32 +717,34 @@ export default function App() {
         </div>
       )}
 
+      {marketView === "futures" && (
+        <>
       <div className="flex items-center justify-between px-3 py-1.5 border-b border-[#131722]">
         <div className="flex gap-2.5 text-[9.5px] font-mono text-[#5b6472] flex-wrap">
-          <span className="text-[#f2c14e]">MA20</span>
-          <span className="text-[#e5537a]">MA50</span>
-          <span className="text-white">MA200</span>
-          <span className="text-[#4a7fd6]">BOLL</span>
-          <span className="text-[#4aa8e0]">전환선</span>
-          <span className="text-[#e07a4a]">기준선</span>
-          <span className="text-[#3ea36b]">구름</span>
+          <span className="text-[#f2c14e]">{t.ma20}</span>
+          <span className="text-[#e5537a]">{t.ma50}</span>
+          <span className="text-white">{t.ma200}</span>
+          <span className="text-[#4a7fd6]">{t.boll}</span>
+          <span className="text-[#4aa8e0]">{t.tenkan}</span>
+          <span className="text-[#e07a4a]">{t.kijun}</span>
+          <span className="text-[#3ea36b]">{t.cloud}</span>
         </div>
         <div className="flex gap-1 items-center">
-          <span className="text-[9px] text-[#3a4658] mr-0.5">좌우</span>
+          <span className="text-[9px] text-[#3a4658] mr-0.5">{t.horizontal}</span>
           <button onClick={zoomIn} className="p-1.5 rounded bg-[#131722] text-[#5b6472] hover:text-white"><ZoomIn size={13} /></button>
           <button onClick={zoomOut} className="p-1.5 rounded bg-[#131722] text-[#5b6472] hover:text-white"><ZoomOut size={13} /></button>
-          <span className="text-[9px] text-[#3a4658] mx-0.5">세로</span>
+          <span className="text-[9px] text-[#3a4658] mx-0.5">{t.vertical}</span>
           <button onClick={vZoomIn} className="p-1.5 rounded bg-[#131722] text-[#5b6472] hover:text-white rotate-90"><ZoomIn size={13} /></button>
           <button onClick={vZoomOut} className="p-1.5 rounded bg-[#131722] text-[#5b6472] hover:text-white rotate-90"><ZoomOut size={13} /></button>
           <button onClick={() => { setDrawMode((d) => !d); pendingPoint.current = null; }} className={`p-1.5 rounded ml-1 ${drawMode ? "bg-[#e8b339] text-black" : "bg-[#131722] text-[#5b6472]"}`}><Pencil size={13} /></button>
           <button onClick={() => setDrawings([])} className="p-1.5 rounded bg-[#131722] text-[#5b6472]"><Trash2 size={13} /></button>
         </div>
       </div>
-      {drawMode && <div className="px-3 py-1 text-[10px] text-[#e8b339] bg-[#1a1206]">차트를 두 번 탭해서 추세선을 그리세요 (본인에게만 표시)</div>}
+      {drawMode && <div className="px-3 py-1 text-[10px] text-[#e8b339] bg-[#1a1206]">{t.drawHint}</div>}
       {!drawMode && !autoFollow.current && (
         <div className="px-3 py-1 text-[10px] text-[#5b6472] bg-[#0d1117] flex justify-between items-center">
-          <span>과거 차트를 보는 중 · 드래그해서 이동</span>
-          <button onClick={() => { autoFollow.current = true; setViewStart(candles.length - viewCount); }} className="text-[#e8b339] font-semibold">최신으로 →</button>
+          <span>{t.viewingPast}</span>
+          <button onClick={() => { autoFollow.current = true; setViewStart(candles.length - viewCount); }} className="text-[#e8b339] font-semibold">{t.goLatest}</button>
         </div>
       )}
 
@@ -693,44 +754,49 @@ export default function App() {
       <div className="border-b border-[#131722]" style={{ height: 60 }}><VolumePanel allCandles={candles} viewStart={viewStart} viewCount={viewCount} /></div>
       <div className="border-b border-[#131722]" style={{ height: 90 }}><RsiPanel allCandles={candles} viewStart={viewStart} viewCount={viewCount} /></div>
 
+        </>
+      )}
+
+      {marketView === "spot" && (
+        <div className="pt-2">
       {/* USDOG/USD 페그 차트 — 정보용, 거래 불가 */}
       <div className="px-3 pt-3 pb-1 flex items-center justify-between">
-        <span className="text-[10.5px] font-semibold text-[#8b96a5]">USDOG / USD 페그</span>
-        <span className="text-[9px] text-[#3a4658]">정보 제공용 · 거래 불가</span>
+        <span className="text-[10.5px] font-semibold text-[#8b96a5]">{t.pegChartTitle}</span>
+        <span className="text-[9px] text-[#3a4658]">{t.pegChartNotice}</span>
       </div>
       <div className="border-b border-[#131722]" style={{ height: 70 }}><PegChart pegHistory={pegHistory} /></div>
 
       {/* SOG ↔ USDOG 컨버트 */}
       <div className="mx-3 mt-3 rounded-xl border border-[#1a1f2b] p-3">
-        <div className="text-[11px] font-semibold text-[#8b96a5] mb-2">SOG ↔ USDOG 환전</div>
+        <div className="text-[11px] font-semibold text-[#8b96a5] mb-2">{t.convertTitle}</div>
         <div className="flex rounded-lg overflow-hidden border border-[#1a1f2b] mb-2 text-[11px] font-semibold">
           <button
             onClick={() => setConvertMode("toSog")}
             className={`flex-1 py-1.5 ${convertMode === "toSog" ? "bg-[#e8b339] text-black" : "bg-[#131722] text-[#5b6472]"}`}
           >
-            USDOG → SOG
+            {t.convertToSog}
           </button>
           <button
             onClick={() => setConvertMode("toUsdog")}
             className={`flex-1 py-1.5 ${convertMode === "toUsdog" ? "bg-[#e8b339] text-black" : "bg-[#131722] text-[#5b6472]"}`}
           >
-            SOG → USDOG
+            {t.convertToUsdog}
           </button>
         </div>
         <div className="text-[10px] text-[#5b6472] flex justify-between mb-1.5">
-          <span>보유: {convertMode === "toSog" ? `${balance.toFixed(2)} USDOG` : `${sogHolding.toFixed(2)} SOG`}</span>
-          <span>현재가 {price.toFixed(6)}</span>
+          <span>{t.convertHolding}: {convertMode === "toSog" ? `${balance.toFixed(2)} USDOG` : `${sogHolding.toFixed(2)} SOG`}</span>
+          <span>{t.convertPrice} {price.toFixed(6)}</span>
         </div>
         <input
           type="number"
           value={convertInput}
           onChange={(e) => setConvertInput(e.target.value)}
-          placeholder={convertMode === "toSog" ? "USDOG 수량" : "SOG 수량"}
+          placeholder={convertMode === "toSog" ? t.convertPlaceholderSog : t.convertPlaceholderUsdog}
           className="w-full bg-[#131722] border border-[#1a1f2b] rounded px-3 py-2 text-sm font-mono focus:outline-none focus:border-[#3a4658] mb-2"
         />
         {convertAmount > 0 && (
           <div className="text-[10.5px] text-[#8b96a5] mb-2 font-mono">
-            받는 수량: <span className="text-[#e8b339] font-bold">{convertPreview.toFixed(4)} {convertMode === "toSog" ? "SOG" : "USDOG"}</span>
+            {t.convertReceive}: <span className="text-[#e8b339] font-bold">{convertPreview.toFixed(4)} {convertMode === "toSog" ? "SOG" : "USDOG"}</span>
           </div>
         )}
         <button
@@ -738,10 +804,15 @@ export default function App() {
           disabled={convertAmount <= 0 || (convertMode === "toSog" ? convertAmount > balance : convertAmount > sogHolding)}
           className="w-full bg-[#e8b339] hover:bg-[#f0c257] disabled:opacity-30 disabled:cursor-not-allowed text-black font-bold py-2.5 rounded-lg text-sm"
         >
-          환전하기
+          {t.convertButton}
         </button>
       </div>
 
+        </div>
+      )}
+
+      {marketView === "futures" && (
+        <>
       {/* Order entry + book */}
       <div className="grid grid-cols-5 gap-0 border-b border-[#131722]">
         <div className="col-span-3 p-3 flex flex-col gap-2.5 border-r border-[#131722]">
@@ -754,21 +825,21 @@ export default function App() {
                 onClick={() => setMarginMode("cross")}
                 disabled={!!position || liquidated}
                 className={`flex-1 text-[11px] font-semibold ${marginMode === "cross" ? "bg-[#e8b339] text-black" : "bg-[#131722] text-[#5b6472]"}`}
-              >Cross</button>
+              >{t.cross}</button>
               <button
                 onClick={() => setMarginMode("isolated")}
                 disabled={!!position || liquidated}
                 className={`flex-1 text-[11px] font-semibold ${marginMode === "isolated" ? "bg-[#e8b339] text-black" : "bg-[#131722] text-[#5b6472]"}`}
-              >격리</button>
+              >{t.isolated}</button>
             </div>
           </div>
 
           <div className="text-[11px] text-[#5b6472] flex justify-between">
-            <span>Available</span>
+            <span>{t.available}</span>
             <span className="font-mono text-[#c9d1d9]">{balance.toFixed(2)} USDOG</span>
           </div>
 
-          <input type="number" value={marginInput} onChange={(e) => setMarginInput(e.target.value)} placeholder="증거금 (USDOG)" disabled={!!position || liquidated}
+          <input type="number" value={marginInput} onChange={(e) => setMarginInput(e.target.value)} placeholder={t.marginPlaceholder} disabled={!!position || liquidated}
             className="w-full bg-[#131722] border border-[#1a1f2b] rounded px-3 py-2 text-sm font-mono focus:outline-none focus:border-[#3a4658]" />
           <div className="flex gap-1.5">
             {[0.25, 0.5, 0.75, 1].map((p) => (
@@ -778,7 +849,7 @@ export default function App() {
 
           {position && (
             <div className="text-[10px] text-[#5b6472] flex justify-between font-mono">
-              <span>청산가 ({position.mode === "isolated" ? "격리" : "교차"})</span>
+              <span>{t.liqPrice} ({position.mode === "isolated" ? t.isolated : t.cross})</span>
               <span className="text-[#f6465d]">{liqPrice.toFixed(6)}</span>
             </div>
           )}
@@ -789,14 +860,14 @@ export default function App() {
               disabled={!!position || liquidated || margin <= 0 || margin > balance}
               className={`bg-[#f6465d] hover:bg-[#e03350] disabled:opacity-30 disabled:cursor-not-allowed text-white font-bold py-3 rounded-lg flex items-center justify-center gap-1.5 transition-all active:scale-95 ${clickFx === "long" ? "ring-2 ring-white" : ""}`}
             >
-              <TrendingUp size={15} /> Long
+              <TrendingUp size={15} /> {t.long}
             </button>
             <button
               onClick={() => openPosition("short")}
               disabled={!!position || liquidated || margin <= 0 || margin > balance}
               className={`bg-[#3b82f6] hover:bg-[#2f6fd6] disabled:opacity-30 disabled:cursor-not-allowed text-white font-bold py-3 rounded-lg flex items-center justify-center gap-1.5 transition-all active:scale-95 ${clickFx === "short" ? "ring-2 ring-white" : ""}`}
             >
-              <TrendingDown size={15} /> Short
+              <TrendingDown size={15} /> {t.short}
             </button>
           </div>
         </div>
@@ -804,7 +875,7 @@ export default function App() {
       </div>
 
       <div className="mx-3 mt-2 px-3 py-2 bg-[#131722] rounded text-[10.5px] text-[#8b96a5] flex justify-between items-center">
-        <span>⚠ SOG/USDOG는 실험적 시장입니다. 변동성이 매우 높습니다.</span>
+        <span>{t.warningBanner}</span>
       </div>
 
       {/* Position PnL — big visible card */}
@@ -815,22 +886,22 @@ export default function App() {
               <span className={`px-2 py-0.5 rounded text-[11px] font-bold ${position.side === "long" ? "bg-[#f6465d]/20 text-[#f6465d]" : "bg-[#3b82f6]/20 text-[#3b82f6]"}`}>
                 {position.side === "long" ? "LONG" : "SHORT"} {position.leverage}x
               </span>
-              <span className="text-[10px] text-[#5b6472]">{position.mode === "isolated" ? "격리" : "교차"}</span>
+              <span className="text-[10px] text-[#5b6472]">{position.mode === "isolated" ? t.isolated : t.cross}</span>
             </div>
-            <button onClick={closePosition} className="bg-[#1a1f2b] hover:bg-[#232a38] text-[11px] font-semibold px-3 py-1.5 rounded flex items-center gap-1"><X size={11} /> 종료</button>
+            <button onClick={closePosition} className="bg-[#1a1f2b] hover:bg-[#232a38] text-[11px] font-semibold px-3 py-1.5 rounded flex items-center gap-1"><X size={11} /> {t.close}</button>
           </div>
           <div className="px-4 py-3 flex items-center justify-between">
-            <span className="text-[11px] text-[#5b6472]">평가손익</span>
+            <span className="text-[11px] text-[#5b6472]">{t.pnl}</span>
             <span className={`font-mono font-black text-2xl ${pnl >= 0 ? "text-[#f6465d]" : "text-[#3b82f6]"}`}>
               {pnl >= 0 ? "+" : ""}{pnl.toFixed(2)} <span className="text-sm">USDOG</span>
             </span>
           </div>
           <div className="px-4 pb-3 flex justify-between text-[11px]">
-            <span className="text-[#5b6472]">수익률</span>
+            <span className="text-[#5b6472]">{t.pnlPct}</span>
             <span className={`font-mono font-bold ${pnlPct >= 0 ? "text-[#f6465d]" : "text-[#3b82f6]"}`}>{pnlPct >= 0 ? "+" : ""}{pnlPct.toFixed(1)}%</span>
           </div>
           <div className="px-4 pb-3 flex justify-between text-[11px] font-mono">
-            <span className="text-[#5b6472]">증거금 / 청산가</span>
+            <span className="text-[#5b6472]">{t.marginLiq}</span>
             <span>{position.margin.toFixed(2)} USDOG · <span className="text-[#f6465d]">{liqPrice.toFixed(6)}</span></span>
           </div>
           {position.mode === "cross" && (
@@ -839,7 +910,7 @@ export default function App() {
                 type="number"
                 value={addMarginInput}
                 onChange={(e) => setAddMarginInput(e.target.value)}
-                placeholder="추가 증거금 (불타기)"
+                placeholder={t.addMarginPlaceholder}
                 className="flex-1 bg-[#131722] border border-[#1a1f2b] rounded px-2.5 py-1.5 text-xs font-mono focus:outline-none focus:border-[#3a4658]"
               />
               <button
@@ -847,29 +918,29 @@ export default function App() {
                 disabled={Number(addMarginInput) <= 0 || Number(addMarginInput) > balance}
                 className="bg-[#e8b339] hover:bg-[#f0c257] disabled:opacity-30 disabled:cursor-not-allowed text-black text-xs font-bold px-3 py-1.5 rounded whitespace-nowrap"
               >
-                🔥 불타기
+                {t.addMarginButton}
               </button>
             </div>
           )}
           {position.mode === "isolated" && (
-            <div className="px-4 pb-3 text-[9.5px] text-[#3a4658]">격리 모드는 추가 증거금 투입이 불가합니다. 청산 위험을 줄이려면 교차 모드를 사용하세요.</div>
+            <div className="px-4 pb-3 text-[9.5px] text-[#3a4658]">{t.isolatedNotice}</div>
           )}
         </div>
       )}
 
       <div className="flex gap-4 px-3 mt-3 border-b border-[#131722] text-[13px]">
-        {["positions", "log"].map((t) => (
-          <button key={t} onClick={() => setTab(t)} className={`pb-2 ${tab === t ? "text-white border-b-2 border-[#e8b339] font-semibold" : "text-[#5b6472]"}`}>
-            {t === "positions" ? `Positions(${position ? 1 : 0})` : "Log"}
+        {["positions", "log"].map((tabKey) => (
+          <button key={tabKey} onClick={() => setTab(tabKey)} className={`pb-2 ${tab === tabKey ? "text-white border-b-2 border-[#e8b339] font-semibold" : "text-[#5b6472]"}`}>
+            {tabKey === "positions" ? `${t.tabPositions}(${position ? 1 : 0})` : t.tabLog}
           </button>
         ))}
       </div>
 
       <div className="p-3">
-        {tab === "positions" && !position && <div className="text-center text-[#3a4658] text-xs py-6">보유 중인 포지션이 없습니다</div>}
+        {tab === "positions" && !position && <div className="text-center text-[#3a4658] text-xs py-6">{t.noPosition}</div>}
         {tab === "log" && (
           <div className="flex flex-col gap-1 max-h-40 overflow-y-auto">
-            {log.length === 0 && <div className="text-[#3a4658] text-xs py-4 text-center">거래 기록이 없습니다</div>}
+            {log.length === 0 && <div className="text-[#3a4658] text-xs py-4 text-center">{t.noLog}</div>}
             {log.map((l) => (
               <div key={l.id} className={`text-[11px] font-mono ${l.tone === "good" ? "text-[#f6465d]" : l.tone === "bad" ? "text-[#3b82f6]" : "text-[#5b6472]"}`}>{l.msg}</div>
             ))}
@@ -877,15 +948,18 @@ export default function App() {
         )}
       </div>
 
+        </>
+      )}
+
       {showInfo && (
         <div className="fixed inset-0 bg-black/85 flex items-center justify-center p-4 z-50" onClick={() => setShowInfo(false)}>
           <div className="bg-[#0d1117] border border-[#1a1f2b] rounded-xl p-5 max-w-sm w-full" onClick={(e) => e.stopPropagation()}>
-            <div className="font-bold text-base mb-3">SOG 시장 정보</div>
+            <div className="font-bold text-base mb-3">{t.marketInfoTitle}</div>
             <div className="space-y-3 text-[12px] font-mono">
-              <div className="flex justify-between"><span className="text-[#5b6472]">총발행량</span><span>100,000,000,000,000 SOG</span></div>
+              <div className="flex justify-between"><span className="text-[#5b6472]">{t.totalSupply}</span><span>100,000,000,000,000 SOG</span></div>
 
               <div>
-                <div className="flex justify-between"><span className="text-[#5b6472]">예치 준비금</span><span>{USDOG_POOL.toLocaleString()} USDOG</span></div>
+                <div className="flex justify-between"><span className="text-[#5b6472]">{t.reservePool}</span><span>{USDOG_POOL.toLocaleString()} USDOG</span></div>
                 <div className="flex justify-between text-[10px] text-[#5b6472] mt-0.5">
                   <span></span>
                   <span>≈ ${USDOG_POOL.toLocaleString()} USD · ₩{Math.round(USDOG_POOL * KRW_PER_USDOG).toLocaleString()} KRW</span>
@@ -893,7 +967,7 @@ export default function App() {
               </div>
 
               <div>
-                <div className="flex justify-between"><span className="text-[#5b6472]">시작 가격</span><span>{START_PRICE.toFixed(6)} USDOG</span></div>
+                <div className="flex justify-between"><span className="text-[#5b6472]">{t.startPrice}</span><span>{START_PRICE.toFixed(6)} USDOG</span></div>
                 <div className="flex justify-between text-[10px] text-[#5b6472] mt-0.5">
                   <span></span>
                   <span>≈ ${START_PRICE.toFixed(6)} USD · ₩{(START_PRICE * KRW_PER_USDOG).toFixed(2)} KRW</span>
@@ -901,7 +975,7 @@ export default function App() {
               </div>
 
               <div>
-                <div className="flex justify-between"><span className="text-[#5b6472]">현재 가격</span><span className="text-[#e8b339]">{price.toFixed(6)} USDOG</span></div>
+                <div className="flex justify-between"><span className="text-[#5b6472]">{t.currentPrice}</span><span className="text-[#e8b339]">{price.toFixed(6)} USDOG</span></div>
                 <div className="flex justify-between text-[10px] text-[#5b6472] mt-0.5">
                   <span></span>
                   <span>≈ ${price.toFixed(6)} USD · ₩{(price * KRW_PER_USDOG).toFixed(2)} KRW</span>
@@ -909,15 +983,15 @@ export default function App() {
               </div>
 
               <div>
-                <div className="flex justify-between"><span className="text-[#5b6472]">현재 시가총액</span><span>{(price * SOG_TOTAL_SUPPLY).toLocaleString(undefined, { maximumFractionDigits: 0 })} USDOG</span></div>
+                <div className="flex justify-between"><span className="text-[#5b6472]">{t.marketCap}</span><span>{(price * SOG_TOTAL_SUPPLY).toLocaleString(undefined, { maximumFractionDigits: 0 })} USDOG</span></div>
                 <div className="flex justify-between text-[10px] text-[#5b6472] mt-0.5">
                   <span></span>
                   <span>≈ ${(price * SOG_TOTAL_SUPPLY).toLocaleString(undefined, { maximumFractionDigits: 0 })} USD · ₩{Math.round(price * SOG_TOTAL_SUPPLY * KRW_PER_USDOG).toLocaleString()} KRW</span>
                 </div>
               </div>
             </div>
-            <div className="text-[10px] text-[#5b6472] mt-4 leading-relaxed">시총 = 현재가 × 총발행량. 시작 시총은 예치 준비금(1조 USDOG)과 동일합니다. USDOG는 1달러 페그 스테이블코인이라 USD 금액과 동일합니다.</div>
-            <button onClick={() => setShowInfo(false)} className="w-full mt-4 bg-[#131722] py-2 rounded text-xs">닫기</button>
+            <div className="text-[10px] text-[#5b6472] mt-4 leading-relaxed">{t.marketInfoNote}</div>
+            <button onClick={() => setShowInfo(false)} className="w-full mt-4 bg-[#131722] py-2 rounded text-xs">{t.closeBtn}</button>
           </div>
         </div>
       )}
@@ -926,10 +1000,10 @@ export default function App() {
         <div className="fixed inset-0 bg-black/85 flex items-center justify-center p-4 z-50">
           <div className="bg-[#0d1117] border border-[#f6465d]/40 rounded-xl p-6 max-w-xs w-full text-center">
             <div className="w-14 h-14 mx-auto rounded-full overflow-hidden mb-3"><img src={USDOG_LOGO} alt="USDOG" className="w-full h-full object-cover" /></div>
-            <div className="text-base font-bold text-[#f6465d] mb-1">청산되었습니다</div>
-            <div className="text-[11px] text-[#5b6472] mb-5">아래 버튼을 눌러 1000 USDOG를 받고 다시 시작하세요.<br/><span className="text-[#3a4658]">(추후 이 버튼은 광고 시청 후 지급으로 변경됩니다)</span></div>
+            <div className="text-base font-bold text-[#f6465d] mb-1">{t.liquidatedTitle}</div>
+            <div className="text-[11px] text-[#5b6472] mb-5">{t.liquidatedDesc1}<br/><span className="text-[#3a4658]">{t.liquidatedDesc2}</span></div>
             <button onClick={instantRefill} className="w-full bg-[#e8b339] hover:bg-[#f0c257] text-black font-bold py-3 rounded-lg flex items-center justify-center gap-2 active:scale-95 transition-transform">
-              <Play size={16} /> 코인 리필 받기
+              <Play size={16} /> {t.refillButton}
             </button>
           </div>
         </div>
