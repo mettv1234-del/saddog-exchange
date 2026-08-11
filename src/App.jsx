@@ -4,7 +4,7 @@ import { USDOG_LOGO, SOG_LOGO } from "./logos.js";
 import { useTranslation } from "./i18n.js";
 
 const TICK_MS = 500;
-const MAX_HISTORY = 400;
+const MAX_HISTORY = 5000; // 넉넉한 히스토리 보관 (약 40분 분량, TICK_MS=500ms 기준) — MA200/일목 등 지표가 끊기지 않도록
 const VISIBLE_CANDLES_DEFAULT = 70;
 const START_BALANCE_USDOG = 1000;
 const KRW_PER_USDOG = 1430;
@@ -173,14 +173,22 @@ function ichimoku(candles) {
 }
 
 // ============ Chart w/ pan + zoom ============
-function TradingChart({ allCandles, liqPrice, entryPrice, drawings, onAddPoint, drawMode, viewStart, viewCount, onPan, vZoom, onZoomH, onZoomV, onSetViewCount }) {
+function TradingChart({ allCandles, liqPrice, entryPrice, drawings, onAddPoint, drawMode, viewStart, viewCount, onPan, vZoom, onZoomH, onZoomV, onSetViewCount, tradeMarkers }) {
   const w = 1000, h = 400, padL = 8, padR = 82, padT = 10, padB = 6;
   const candles = allCandles.slice(viewStart, viewStart + viewCount);
-  const closes = allCandles.map((c) => c.c);
+
+  // 성능 최적화: 전체 히스토리 대신 "보이는 구간 + 지표 계산에 필요한 lookback"만 잘라서 계산
+  // (MA200이 가장 긴 lookback=200; 화면을 넓게 볼 때도 최소 200개 선행 데이터 확보)
+  const LOOKBACK = Math.max(220, 200);
+  const calcStart = Math.max(0, viewStart - LOOKBACK);
+  const calcSlice = allCandles.slice(calcStart, viewStart + viewCount);
+  const closes = calcSlice.map((c) => c.c);
   const ma20full = sma(closes, 20), ma50full = sma(closes, 50), ma200full = sma(closes, 200);
   const bollFull = bollinger(closes, 20, 2.2);
-  const ichiFull = ichimoku(allCandles);
-  const slice = (arr) => arr.slice(viewStart, viewStart + viewCount);
+  const ichiFull = ichimoku(calcSlice);
+  // calcSlice 기준 인덱스를 뷰포트(viewStart) 기준으로 다시 잘라내기
+  const viewOffsetInCalc = viewStart - calcStart;
+  const slice = (arr) => arr.slice(viewOffsetInCalc, viewOffsetInCalc + viewCount);
   const ma20 = slice(ma20full), ma50 = slice(ma50full), ma200 = slice(ma200full), boll = slice(bollFull);
   const ichi = { conv: slice(ichiFull.conv), base: slice(ichiFull.base), spanA: slice(ichiFull.spanA), spanB: slice(ichiFull.spanB) };
 
@@ -365,6 +373,37 @@ function TradingChart({ allCandles, liqPrice, entryPrice, drawings, onAddPoint, 
           </g>
         );
       })}
+      {/* 거래 마커: 롱진입(B, 초록 위 삼각형), 숏진입(S, 빨강 아래 삼각형), 종료/청산은 X */}
+      {(tradeMarkers || []).map((mk, i) => {
+        const mx = idxToX(mk.idx);
+        if (mx == null) return null;
+        const my = y(mk.price);
+        if (mk.type === "entry") {
+          const isLong = mk.side === "long";
+          const color = isLong ? "#00d68f" : "#f6465d";
+          const triY = isLong ? my + 14 : my - 14;
+          const points = isLong
+            ? `${mx - 5},${triY + 6} ${mx + 5},${triY + 6} ${mx},${triY - 4}`
+            : `${mx - 5},${triY - 6} ${mx + 5},${triY - 6} ${mx},${triY + 4}`;
+          return (
+            <g key={i}>
+              <polygon points={points} fill={color} />
+              <text x={mx} y={isLong ? triY + 20 : triY - 12} fill={color} fontSize="9" fontFamily="monospace" fontWeight="bold" textAnchor="middle">
+                {isLong ? "B" : "S"}
+              </text>
+            </g>
+          );
+        }
+        // exit / liquidation
+        const color = mk.type === "liquidation" ? "#f6465d" : "#8b96a5";
+        return (
+          <g key={i} opacity="0.85">
+            <circle cx={mx} cy={my} r="5" fill="none" stroke={color} strokeWidth="1.3" />
+            <line x1={mx - 2.5} y1={my - 2.5} x2={mx + 2.5} y2={my + 2.5} stroke={color} strokeWidth="1.3" />
+            <line x1={mx - 2.5} y1={my + 2.5} x2={mx + 2.5} y2={my - 2.5} stroke={color} strokeWidth="1.3" />
+          </g>
+        );
+      })}
       {drawings.map((d, i) => {
         const x1 = idxToX(d.p1.idx);
         const x2 = idxToX((d.p2 || d.p1).idx);
@@ -432,7 +471,10 @@ function VolumePanel({ allCandles, viewStart, viewCount }) {
 
 function RsiPanel({ allCandles, viewStart, viewCount }) {
   const w = 1000, h = 90, padL = 8, padR = 82, padT = 6, padB = 6;
-  const closesFull = allCandles.map((c) => c.c);
+  // 성능 최적화: RSI(14)+Signal(20) 계산에 필요한 lookback만 사용
+  const LOOKBACK = 60;
+  const calcStart = Math.max(0, viewStart - LOOKBACK);
+  const closesFull = allCandles.slice(calcStart, viewStart + viewCount).map((c) => c.c);
   const rsi14Full = rsi(closesFull, 14);
   const validVals = rsi14Full.filter((v) => v != null);
   const rsiSmaFull = sma(validVals, 20);
@@ -440,8 +482,9 @@ function RsiPanel({ allCandles, viewStart, viewCount }) {
   const signalFull = new Array(rsi14Full.length).fill(null);
   rsiSmaFull.forEach((v, i) => (signalFull[i + offset] = v));
 
-  const rsi14 = rsi14Full.slice(viewStart, viewStart + viewCount);
-  const signal = signalFull.slice(viewStart, viewStart + viewCount);
+  const viewOffsetInCalc = viewStart - calcStart;
+  const rsi14 = rsi14Full.slice(viewOffsetInCalc, viewOffsetInCalc + viewCount);
+  const signal = signalFull.slice(viewOffsetInCalc, viewOffsetInCalc + viewCount);
 
   const y = (v) => padT + (h - padT - padB) - (v / 100) * (h - padT - padB);
   const x = (i) => padL + (i / (rsi14.length - 1)) * (w - padL - padR);
@@ -513,6 +556,7 @@ export default function App() {
   const [balance, setBalance] = useState(START_BALANCE_USDOG);
   const [sogHolding, setSogHolding] = useState(0); // 보유 SOG 현물 (포지션과 별개, 레버리지 없음)
   const [position, setPosition] = useState(null); // {side, size, entry, leverage, margin, mode}
+  const [tradeMarkers, setTradeMarkers] = useState([]); // {idx, price, type: "buy"|"sell", side}
   const [leverage, setLeverage] = useState(12.5);
   const [marginMode, setMarginMode] = useState("cross"); // "cross" | "isolated"
   const [marginInput, setMarginInput] = useState("");
@@ -565,6 +609,7 @@ export default function App() {
     const hit = position.side === "long" ? price <= liqPrice : price >= liqPrice;
     if (hit) {
       pushLog(`💥 청산 · ${position.side.toUpperCase()} ${position.leverage}x (${position.mode === "isolated" ? "격리" : "교차"}) · 증거금 ${position.margin.toFixed(2)} USDOG 손실`, "bad");
+      setTradeMarkers((m) => [...m, { idx: candles[candles.length - 1].t, price, type: "liquidation", side: position.side }]);
       // 실제 거래소처럼 모달 없이 조용히 포지션만 사라짐 (잔고는 그대로, 이미 증거금은 차감된 상태)
       setPosition(null);
       setFlashLiquidation(true);
@@ -583,6 +628,7 @@ export default function App() {
     setPosition({ side, size, entry: price, leverage, margin, mode: marginMode });
     orderFlowRef.current.pending += side === "long" ? 1 : -1;
     pushLog(`${side === "long" ? "Long" : "Short"} 진입 · ${leverage}x · ${marginMode === "isolated" ? "격리" : "교차"} · ${margin} USDOG`, side === "long" ? "good" : "bad");
+    setTradeMarkers((m) => [...m, { idx: candles[candles.length - 1].t, price, type: "entry", side }]);
     setMarginInput("");
     setClickFx(side);
     setTimeout(() => setClickFx(null), 250);
@@ -604,6 +650,7 @@ export default function App() {
     setBalance((b) => b + position.margin + pnl);
     orderFlowRef.current.pending += position.side === "long" ? -0.7 : 0.7;
     pushLog(`포지션 종료 · ${pnl >= 0 ? "+" : ""}${pnl.toFixed(2)} USDOG`, pnl >= 0 ? "good" : "bad");
+    setTradeMarkers((m) => [...m, { idx: candles[candles.length - 1].t, price, type: "exit", side: position.side }]);
     setPosition(null);
   };
 
@@ -830,7 +877,7 @@ export default function App() {
       )}
 
       <div className="border-b border-[#131722]" style={{ height: 400 }}>
-        <TradingChart allCandles={candles} liqPrice={liqPrice} entryPrice={position?.entry} drawings={drawings} onAddPoint={handleAddPoint} drawMode={drawMode} viewStart={viewStart} viewCount={viewCount} onPan={handlePan} vZoom={vZoom} onZoomH={(dir) => (dir > 0 ? zoomIn() : zoomOut())} onZoomV={(dir) => (dir > 0 ? vZoomIn() : vZoomOut())} onSetViewCount={setViewCount} />
+        <TradingChart allCandles={candles} liqPrice={liqPrice} entryPrice={position?.entry} drawings={drawings} onAddPoint={handleAddPoint} drawMode={drawMode} viewStart={viewStart} viewCount={viewCount} onPan={handlePan} vZoom={vZoom} onZoomH={(dir) => (dir > 0 ? zoomIn() : zoomOut())} onZoomV={(dir) => (dir > 0 ? vZoomIn() : vZoomOut())} onSetViewCount={setViewCount} tradeMarkers={tradeMarkers} />
       </div>
       <div className="border-b border-[#131722]" style={{ height: 60 }}><VolumePanel allCandles={candles} viewStart={viewStart} viewCount={viewCount} /></div>
       <div className="border-b border-[#131722]" style={{ height: 90 }}><RsiPanel allCandles={candles} viewStart={viewStart} viewCount={viewCount} /></div>
