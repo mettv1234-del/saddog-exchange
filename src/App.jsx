@@ -70,8 +70,8 @@ function useEngine(orderFlowRef, difficulty) {
   const [eventLabel, setEventLabel] = useState(null);
   const sRef = useRef({
     price: START_PRICE, momentum: 0, tick: 0, pendingFlow: [],
-    eventTicks: 0, eventTotalTicks: 0, eventPhase: 0, eventDir: 0, eventStrength: 0, // 빅이벤트: 출렁이며 원웨이 트렌드
-    megaEventTicks: 0, megaEventTotalTicks: 0, megaEventDir: 0, megaEventStrength: 0, // 메가이벤트: 비트코인급 초강세 트렌드
+    event: null, // 빅이벤트 상태머신: {pattern, phase, phaseIdx, phases:[...], startPrice, dir}
+    megaEventTicks: 0, megaEventTotalTicks: 0, megaEventDir: 0, megaEventStrength: 0,
   });
   const diffRef = useRef(difficulty);
   diffRef.current = difficulty;
@@ -81,24 +81,47 @@ function useEngine(orderFlowRef, difficulty) {
       const s = sRef.current;
       const preset = DIFFICULTY_PRESETS[diffRef.current] || DIFFICULTY_PRESETS.normal;
 
-      // 빅이벤트: 아주 가끔(무작위, 낮은 확률) 발동 — 발동하면 한 방향으로, 저점/고점을 계단식으로 갱신하며 출렁출렁 진행
-      if (s.eventTicks <= 0 && s.megaEventTicks <= 0 && Math.random() < 0.0025 * preset.volMult) {
-        s.eventTicks = 40 + Math.floor(Math.random() * 80); // 길게 지속되는 트렌드
-        s.eventTotalTicks = s.eventTicks;
-        s.eventPhase = Math.random() * Math.PI * 2;
-        s.eventDir = Math.random() < 0.5 ? 1 : -1;
-        // 목표 배율 1~10배 사이 (0.01 기준이면 0.01~0.1 근처까지도 갈 수 있음)
-        const targetMult = 1 + Math.random() * 9;
-        s.eventStrength = (Math.pow(targetMult, 1 / s.eventTicks) - 1); // 매틱 곱연산 증가율
-        setEventLabel(s.eventDir > 0 ? "🚀 대량 매수 유입 (강세 트렌드)" : "🔻 대량 매도 유입 (약세 트렌드)");
+      // 빅이벤트 발동: 패턴1(이중바닥 박스권 브레이크아웃) 또는 패턴2(계단식 지그재그) 중 무작위 선택
+      if (!s.event && s.megaEventTicks <= 0 && Math.random() < 0.0022 * preset.volMult) {
+        const dir = Math.random() < 0.5 ? 1 : -1;
+        const patternType = Math.random() < 0.5 ? 1 : 2;
+        const startPrice = s.price;
+
+        if (patternType === 1) {
+          // 패턴1: 고점 찍고 조정 → 더 낮은(높은) 고점 → 비슷한 저점 재터치 → 횡보 → 강한 브레이크아웃
+          const legMult = 1.4 + Math.random() * 2.2; // 첫 다리 강도
+          s.event = {
+            pattern: 1, dir, startPrice, phaseIdx: 0,
+            phases: [
+              { name: "leg1", ticks: 18 + rndInt(12), mult: legMult, vol: 1.0 },        // 첫 상승/하락
+              { name: "pullback1", ticks: 12 + rndInt(10), mult: 1 / (legMult * 0.55), vol: 0.6 }, // 조정 (완전히 되돌리지 않음)
+              { name: "leg2", ticks: 14 + rndInt(10), mult: legMult * 0.7, vol: 1.0 },  // 이전 고점보다 낮게 재상승
+              { name: "retest", ticks: 10 + rndInt(8), mult: 1 / (legMult * 0.62), vol: 0.6 }, // 비슷한 저점 재터치
+              { name: "range", ticks: 14 + rndInt(14), mult: 1.02, vol: 0.35 },          // 횡보 (낮은 변동성)
+              { name: "breakout", ticks: 20 + rndInt(20), mult: 3.0 + Math.random() * 4, vol: 2.6 }, // 강한 브레이크아웃
+            ],
+          };
+        } else {
+          // 패턴2: 저점/고점을 계단식으로 계속 높이며(낮추며) 지그재그 → 마지막 50:50 방향 → 폭발 가속
+          const steps = 3 + rndInt(3);
+          const phases = [];
+          for (let i = 0; i < steps; i++) {
+            phases.push({ name: `up${i}`, ticks: 10 + rndInt(8), mult: 1.3 + Math.random() * 0.9, vol: 1.0 });
+            phases.push({ name: `pull${i}`, ticks: 8 + rndInt(6), mult: 1 / (1.15 + Math.random() * 0.4), vol: 0.5 });
+          }
+          const finalDir = Math.random() < 0.5 ? dir : -dir; // 지그재그 끝에 50:50으로 최종 방향 결정
+          phases.push({ name: "range", ticks: 10 + rndInt(10), mult: 1.01, vol: 0.3 });
+          phases.push({ name: "explode", ticks: 20 + rndInt(18), mult: 3.5 + Math.random() * 4.5, vol: 2.8, overrideDir: finalDir });
+          s.event = { pattern: 2, dir, startPrice, phaseIdx: 0, phases };
+        }
+        emitEventLabel(s);
       }
 
-      // 메가이벤트: 극히 낮은 확률로 비트코인 가격대(~12000)까지 폭등하는 초대형 이벤트
-      if (s.eventTicks <= 0 && s.megaEventTicks <= 0 && Math.random() < 0.00004) {
-        s.megaEventTicks = 300 + Math.floor(Math.random() * 400);
+      // 메가이벤트: 극히 낮은 확률로 비트코인 가격대까지 폭등하는 초대형 이벤트
+      if (!s.event && s.megaEventTicks <= 0 && Math.random() < 0.00004) {
+        s.megaEventTicks = 300 + rndInt(400);
         s.megaEventTotalTicks = s.megaEventTicks;
-        s.megaEventDir = 1; // 메가이벤트는 항상 상승(전설의 불장)
-        const targetPrice = 8000 + Math.random() * 6000; // 8000~14000 사이
+        const targetPrice = 8000 + Math.random() * 6000;
         const targetMult = targetPrice / s.price;
         s.megaEventStrength = Math.pow(Math.max(1.01, targetMult), 1 / s.megaEventTicks) - 1;
         setEventLabel("🌕 전설의 불장 · 역대급 강세장 진입");
@@ -109,7 +132,7 @@ function useEngine(orderFlowRef, difficulty) {
       // 유저 주문은 즉시 반영하지 않고 큐에 넣어 지연 후 노이즈와 함께 반영
       const flow = orderFlowRef.current;
       if (flow.pending !== 0) {
-        const delay = 3 + Math.floor(Math.random() * 8);
+        const delay = 3 + rndInt(8);
         s.pendingFlow.push({ ticksLeft: delay, amount: flow.pending * preset.userInfluence });
         flow.pending = 0;
       }
@@ -127,31 +150,42 @@ function useEngine(orderFlowRef, difficulty) {
 
       const open = s.price;
       let next;
+      let wickMult = 1.8; // 기본(평상시) 꼬리 배율
 
       if (s.megaEventTicks > 0) {
-        // 메가이벤트: 저점(고점)을 계단식으로 갱신하며 파도치듯 목표가로 접근 — 막판엔 강하게 터짐
-        const progress = 1 - s.megaEventTicks / s.megaEventTotalTicks; // 0→1
-        const wave = Math.sin(progress * Math.PI * 5) * 0.0035 * (1 - progress * 0.5); // 진행될수록 파동 감쇠
-        const finalBurst = progress > 0.85 ? (progress - 0.85) * 0.02 : 0; // 막판 급등 버스트
+        const progress = 1 - s.megaEventTicks / s.megaEventTotalTicks;
+        const wave = Math.sin(progress * Math.PI * 5) * 0.0035 * (1 - progress * 0.5);
+        const finalBurst = progress > 0.85 ? (progress - 0.85) * 0.02 : 0;
         next = Math.max(PRICE_FLOOR, s.price * (1 + s.megaEventStrength + wave + finalBurst + (Math.random() - 0.5) * 0.0015));
         s.megaEventTicks -= 1;
+        wickMult = 2.2;
         if (s.megaEventTicks === 0) setEventLabel(null);
-      } else if (s.eventTicks > 0) {
-        // 빅이벤트: 방향은 유지하되 저점(또는 고점)을 계단식으로 갱신하며 출렁이듯 진행
-        // (마치 "사줄 것처럼" 눌림목을 주다가 다시 치고 올라가는/내려가는 패턴)
-        const progress = 1 - s.eventTicks / s.eventTotalTicks;
-        const wave = Math.sin(progress * Math.PI * 4 + s.eventPhase) * 0.0045;
-        const pullbackDamp = 1 - Math.abs(Math.sin(progress * Math.PI * 4 + s.eventPhase)) * 0.4; // 눌림 구간엔 추세 약화
-        next = Math.max(PRICE_FLOOR, s.price * (1 + s.eventDir * s.eventStrength * pullbackDamp + wave + (Math.random() - 0.5) * 0.0018));
-        s.eventTicks -= 1;
-        if (s.eventTicks === 0) setEventLabel(null);
+      } else if (s.event) {
+        const ph = s.event.phases[s.event.phaseIdx];
+        if (!ph.ticksLeft) ph.ticksLeft = ph.ticks;
+        const phaseDir = ph.overrideDir !== undefined ? ph.overrideDir : s.event.dir;
+        // 이 phase가 끝날 때까지 mult배 만큼 이동하도록 매틱 증가율 산출
+        if (!ph.perTickRate) ph.perTickRate = Math.pow(ph.mult, 1 / ph.ticks) - 1;
+        const noiseScale = 0.0008 * ph.vol;
+        next = Math.max(PRICE_FLOOR, s.price * (1 + phaseDir * ph.perTickRate + (Math.random() - 0.5) * noiseScale * 2));
+        wickMult = 0.6 + ph.vol * 0.9; // 조정/횡보는 꼬리 짧게, 브레이크아웃/폭발은 꼬리 길게
+        ph.ticksLeft -= 1;
+        if (ph.ticksLeft <= 0) {
+          s.event.phaseIdx += 1;
+          if (s.event.phaseIdx >= s.event.phases.length) {
+            s.event = null;
+            setEventLabel(null);
+          } else {
+            emitEventLabel(s);
+          }
+        }
       } else {
-        // 평상시(횡보): 변동성을 더 살려서 지루하지 않게
+        // 평상시(횡보): 변동성을 살려서 지루하지 않게
         s.momentum = s.momentum * 0.65 + drift * 0.35;
         next = Math.max(PRICE_FLOOR, s.price * (1 + s.momentum + drift * 1.6));
+        wickMult = 1.8;
       }
 
-      const wickMult = (s.eventTicks > 0 || s.megaEventTicks > 0) ? 1 : 1.8; // 횡보 구간 꼬리도 더 길게
       const high = Math.max(open, next) * (1 + Math.random() * 0.002 * preset.volMult * wickMult);
       const low = Math.max(PRICE_FLOOR, Math.min(open, next) * (1 - Math.random() * 0.002 * preset.volMult * wickMult));
       const vol = 300 + Math.abs(drift) * 200000 + Math.random() * 700;
@@ -161,6 +195,22 @@ function useEngine(orderFlowRef, difficulty) {
     }, TICK_MS);
     return () => clearInterval(id);
   }, [orderFlowRef]);
+
+  function rndInt(n) { return Math.floor(Math.random() * n); }
+  function emitEventLabel(s) {
+    const ph = s.event.phases[s.event.phaseIdx];
+    const labels = {
+      leg1: s.event.dir > 0 ? "🚀 1차 상승 전개" : "🔻 1차 하락 전개",
+      pullback1: "⚖️ 단기 조정 진행 중",
+      leg2: s.event.dir > 0 ? "🚀 2차 상승 시도" : "🔻 2차 하락 시도",
+      retest: "🔁 저점(고점) 재확인 중",
+      range: "😴 횡보 구간 · 방향 탐색 중",
+      breakout: s.event.dir > 0 ? "💥 박스권 강한 상방 돌파" : "💥 박스권 강한 하방 이탈",
+      explode: (ph.overrideDir ?? s.event.dir) > 0 ? "💥 폭발적 상승 가속" : "💥 폭발적 하락 가속",
+    };
+    const key = ph.name.replace(/[0-9]/g, "");
+    setEventLabel(labels[key] || labels[ph.name] || "⚡ 변동성 확대 중");
+  }
 
   return { candles, eventLabel };
 }
