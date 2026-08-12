@@ -37,16 +37,18 @@ const LEVERAGE_MARGIN_CAP = {
 };
 
 // 레버리지별 유지증거금률(Maintenance Margin Rate) — 실제 거래소처럼 레버리지가 높을수록 더 빨리 청산됨
+// 레버리지별 유지증거금률(Maintenance Margin Rate) — 실제 거래소처럼 레버리지가 높을수록 mmr도 커서 더 빨리 청산됨
+// (저배율일수록 버틸 수 있는 폭이 넓어야 하므로 mmr이 작아야 함)
 function maintenanceMarginRate(leverage) {
-  if (leverage >= 100) return 0.005;
-  if (leverage >= 75) return 0.0075;
-  if (leverage >= 50) return 0.01;
-  if (leverage >= 20) return 0.025;
+  if (leverage >= 100) return 0.25;
+  if (leverage >= 75) return 0.18;
+  if (leverage >= 50) return 0.12;
+  if (leverage >= 20) return 0.08;
   if (leverage >= 10) return 0.05;
-  if (leverage >= 5) return 0.08;
-  if (leverage >= 3) return 0.12;
-  if (leverage >= 2) return 0.18;
-  return 0.25; // 1x
+  if (leverage >= 5) return 0.025;
+  if (leverage >= 3) return 0.01;
+  if (leverage >= 2) return 0.0075;
+  return 0.005; // 1x — 사실상 청산이 거의 발생하지 않음
 }
 
 // ============ Engine ============
@@ -1279,5 +1281,3 @@ export default function App() {
     </div>
   );
 }
- 
- 
