@@ -4,14 +4,50 @@ import { USDOG_LOGO, SOG_LOGO } from "./logos.js";
 import { useTranslation } from "./i18n.js";
 
 const TICK_MS = 500;
+
+// 가격 크기에 따라 적절한 소수 자릿수로 표시 (작은 값은 사토시까지, 큰 값은 짧게)
+function formatPrice(v) {
+  if (v == null || !isFinite(v)) return "-";
+  if (v >= 1000) return v.toFixed(2);
+  if (v >= 1) return v.toFixed(4);
+  if (v >= 0.01) return v.toFixed(6);
+  return v.toFixed(9);
+}
 const MAX_HISTORY = 5000; // 넉넉한 히스토리 보관 (약 40분 분량, TICK_MS=500ms 기준) — MA200/일목 등 지표가 끊기지 않도록
 const VISIBLE_CANDLES_DEFAULT = 70;
-const START_BALANCE_USDOG = 1000;
+const START_BALANCE_USDOG = 100;
 const KRW_PER_USDOG = 1430;
+const PRICE_FLOOR = 0.000000001; // 사토시 단위 하한 (10^-9)
 
 const SOG_TOTAL_SUPPLY = 100_000_000_000_000;
 const USDOG_POOL = 1_000_000_000_000;
 const START_PRICE = USDOG_POOL / SOG_TOTAL_SUPPLY; // 0.01
+
+// 레버리지별 최대 증거금 한도 (USDOG). 1배는 무제한(Infinity)
+const LEVERAGE_MARGIN_CAP = {
+  100: 10,
+  75: 15,
+  50: 20,
+  20: 100,
+  10: 1000,
+  5: 10000,
+  3: 100000,
+  2: 1000000,
+  1: Infinity,
+};
+
+// 레버리지별 유지증거금률(Maintenance Margin Rate) — 실제 거래소처럼 레버리지가 높을수록 더 빨리 청산됨
+function maintenanceMarginRate(leverage) {
+  if (leverage >= 100) return 0.005;
+  if (leverage >= 75) return 0.0075;
+  if (leverage >= 50) return 0.01;
+  if (leverage >= 20) return 0.025;
+  if (leverage >= 10) return 0.05;
+  if (leverage >= 5) return 0.08;
+  if (leverage >= 3) return 0.12;
+  if (leverage >= 2) return 0.18;
+  return 0.25; // 1x
+}
 
 // ============ Engine ============
 // 난이도별: 변동성 배율, 유저 매매 영향력, 페이크아웃(역방향 유도) 확률
@@ -30,7 +66,11 @@ function useEngine(orderFlowRef, difficulty) {
     }))
   );
   const [eventLabel, setEventLabel] = useState(null);
-  const sRef = useRef({ price: START_PRICE, momentum: 0, eventTicks: 0, eventDir: 0, tick: 0, pendingFlow: [] });
+  const sRef = useRef({
+    price: START_PRICE, momentum: 0, tick: 0, pendingFlow: [],
+    eventTicks: 0, eventDir: 0, eventStrength: 0, // 빅이벤트: 원웨이 트렌드
+    megaEventTicks: 0, megaEventDir: 0, // 메가이벤트: 비트코인급 초강세 트렌드
+  });
   const diffRef = useRef(difficulty);
   diffRef.current = difficulty;
 
@@ -39,10 +79,24 @@ function useEngine(orderFlowRef, difficulty) {
       const s = sRef.current;
       const preset = DIFFICULTY_PRESETS[diffRef.current] || DIFFICULTY_PRESETS.normal;
 
-      if (s.eventTicks <= 0 && Math.random() < 0.012 * preset.volMult) {
-        s.eventTicks = 6 + Math.floor(Math.random() * 10);
+      // 빅이벤트: 아주 가끔(무작위, 낮은 확률) 발동 — 발동하면 한 방향으로 강하게, 일정하게 쭉 밀림
+      if (s.eventTicks <= 0 && s.megaEventTicks <= 0 && Math.random() < 0.0025 * preset.volMult) {
+        s.eventTicks = 40 + Math.floor(Math.random() * 80); // 길게 지속되는 트렌드
         s.eventDir = Math.random() < 0.5 ? 1 : -1;
-        setEventLabel(s.eventDir > 0 ? "🚀 대량 매수 유입" : "🔻 대량 매도 유입");
+        // 목표 배율 1~10배 사이 (0.01 기준이면 0.01~0.1 근처까지도 갈 수 있음)
+        const targetMult = 1 + Math.random() * 9;
+        s.eventStrength = (Math.pow(targetMult, 1 / s.eventTicks) - 1); // 매틱 곱연산 증가율
+        setEventLabel(s.eventDir > 0 ? "🚀 대량 매수 유입 (강세 트렌드)" : "🔻 대량 매도 유입 (약세 트렌드)");
+      }
+
+      // 메가이벤트: 극히 낮은 확률로 비트코인 가격대(~12000)까지 폭등하는 초대형 이벤트
+      if (s.eventTicks <= 0 && s.megaEventTicks <= 0 && Math.random() < 0.00004) {
+        s.megaEventTicks = 300 + Math.floor(Math.random() * 400);
+        s.megaEventDir = 1; // 메가이벤트는 항상 상승(전설의 불장)
+        const targetPrice = 8000 + Math.random() * 6000; // 8000~14000 사이
+        const targetMult = targetPrice / s.price;
+        s.megaEventStrength = Math.pow(Math.max(1.01, targetMult), 1 / s.megaEventTicks) - 1;
+        setEventLabel("🌕 전설의 불장 · 역대급 강세장 진입");
       }
 
       let drift = (Math.random() - 0.5) * 0.006 * preset.volMult;
@@ -66,17 +120,26 @@ function useEngine(orderFlowRef, difficulty) {
       });
       drift += queuedForce;
 
-      if (s.eventTicks > 0) {
-        drift += s.eventDir * (0.01 + Math.random() * 0.015) * preset.volMult;
+      const open = s.price;
+      let next;
+
+      if (s.megaEventTicks > 0) {
+        // 메가이벤트: 원웨이로 일정하게 목표가까지 상승
+        next = Math.max(PRICE_FLOOR, s.price * (1 + s.megaEventStrength + (Math.random() - 0.5) * 0.002));
+        s.megaEventTicks -= 1;
+        if (s.megaEventTicks === 0) setEventLabel(null);
+      } else if (s.eventTicks > 0) {
+        // 빅이벤트: 원웨이로 일정하게 목표배율까지 이동 (약간의 잡음만)
+        next = Math.max(PRICE_FLOOR, s.price * (1 + s.eventDir * s.eventStrength + (Math.random() - 0.5) * 0.0015));
         s.eventTicks -= 1;
         if (s.eventTicks === 0) setEventLabel(null);
+      } else {
+        s.momentum = s.momentum * 0.7 + drift * 0.3;
+        next = Math.max(PRICE_FLOOR, s.price * (1 + s.momentum + drift));
       }
 
-      s.momentum = s.momentum * 0.7 + drift * 0.3;
-      const open = s.price;
-      let next = Math.max(0.0001, s.price * (1 + s.momentum + drift));
       const high = Math.max(open, next) * (1 + Math.random() * 0.002 * preset.volMult);
-      const low = Math.min(open, next) * (1 - Math.random() * 0.002 * preset.volMult);
+      const low = Math.max(PRICE_FLOOR, Math.min(open, next) * (1 - Math.random() * 0.002 * preset.volMult));
       const vol = 300 + Math.abs(drift) * 200000 + Math.random() * 700;
       s.price = next;
       s.tick += 1;
@@ -173,7 +236,7 @@ function ichimoku(candles) {
 }
 
 // ============ Chart w/ pan + zoom ============
-function TradingChart({ allCandles, liqPrice, entryPrice, drawings, onAddPoint, drawMode, viewStart, viewCount, onPan, vZoom, onZoomH, onZoomV, onSetViewCount, tradeMarkers }) {
+function TradingChart({ allCandles, entryLines, drawings, onAddPoint, drawMode, viewStart, viewCount, onPan, vZoom, onZoomH, onZoomV, onSetViewCount, tradeMarkers }) {
   const w = 1000, h = 400, padL = 8, padR = 82, padT = 10, padB = 6;
   const candles = allCandles.slice(viewStart, viewStart + viewCount);
 
@@ -197,8 +260,7 @@ function TradingChart({ allCandles, liqPrice, entryPrice, drawings, onAddPoint, 
   boll.forEach((b) => b.up && vals.push(b.up, b.low));
   ichi.spanA.forEach((v) => v != null && vals.push(v));
   ichi.spanB.forEach((v) => v != null && vals.push(v));
-  if (liqPrice) vals.push(liqPrice);
-  if (entryPrice) vals.push(entryPrice);
+  if (entryLines) entryLines.forEach((l) => { vals.push(l.entry); if (l.liq) vals.push(l.liq); });
   const rawMax = Math.max(...vals) * 1.0004;
   const rawMin = Math.min(...vals) * 0.9996;
   const rawRange = rawMax - rawMin || 1;
@@ -339,7 +401,7 @@ function TradingChart({ allCandles, liqPrice, entryPrice, drawings, onAddPoint, 
       {gridVals.map((v, i) => (
         <g key={i}>
           <line x1={padL} x2={w - padR} y1={y(v)} y2={y(v)} stroke="#151b26" strokeWidth="1" />
-          <text x={w - padR + 6} y={y(v) + 3} fill="#5b6472" fontSize="10.5" fontFamily="monospace">{v.toFixed(6).slice(0, 8)}</text>
+          <text x={w - padR + 6} y={y(v) + 3} fill="#5b6472" fontSize="10.5" fontFamily="monospace">{formatPrice(v)}</text>
         </g>
       ))}
       <path
@@ -355,14 +417,18 @@ function TradingChart({ allCandles, liqPrice, entryPrice, drawings, onAddPoint, 
       <path d={path(ma20)} stroke="#f2c14e" strokeWidth="1.2" fill="none" />
       <path d={path(ma50)} stroke="#e5537a" strokeWidth="1.2" fill="none" />
       <path d={path(ma200)} stroke="#ffffff" strokeWidth="1.2" fill="none" />
-      {entryPrice && <line x1={padL} x2={w - padR} y1={y(entryPrice)} y2={y(entryPrice)} stroke="#8b96a5" strokeDasharray="4 3" strokeWidth="1" />}
-      {liqPrice && (
-        <g>
-          <line x1={padL} x2={w - padR} y1={y(liqPrice)} y2={y(liqPrice)} stroke="#f6465d" strokeDasharray="2 3" strokeWidth="1" />
-          <rect x={w - padR} y={y(liqPrice) - 8} width={padR} height={16} fill="#f6465d" />
-          <text x={w - padR + 4} y={y(liqPrice) + 4} fill="#000" fontSize="10" fontFamily="monospace" fontWeight="bold">청산</text>
+      {(entryLines || []).map((l, i) => (
+        <g key={i}>
+          <line x1={padL} x2={w - padR} y1={y(l.entry)} y2={y(l.entry)} stroke="#8b96a5" strokeDasharray="4 3" strokeWidth="1" />
+          {l.liq && (
+            <g>
+              <line x1={padL} x2={w - padR} y1={y(l.liq)} y2={y(l.liq)} stroke="#f6465d" strokeDasharray="2 3" strokeWidth="1" />
+              <rect x={w - padR} y={y(l.liq) - 8} width={padR} height={16} fill="#f6465d" />
+              <text x={w - padR + 4} y={y(l.liq) + 4} fill="#000" fontSize="10" fontFamily="monospace" fontWeight="bold">청산</text>
+            </g>
+          )}
         </g>
-      )}
+      ))}
       {candles.map((c, i) => {
         const up = c.c >= c.o;
         const color = up ? "#f6465d" : "#3b82f6";
@@ -413,7 +479,7 @@ function TradingChart({ allCandles, liqPrice, entryPrice, drawings, onAddPoint, 
         );
       })}
       <rect x={w - padR} y={y(last.c) - 9} width={padR} height={18} fill={last.c >= last.o ? "#f6465d" : "#3b82f6"} />
-      <text x={w - padR + 4} y={y(last.c) + 4} fill="#fff" fontSize="10.5" fontFamily="monospace" fontWeight="bold">{last.c.toFixed(6).slice(0, 8)}</text>
+      <text x={w - padR + 4} y={y(last.c) + 4} fill="#fff" fontSize="10.5" fontFamily="monospace" fontWeight="bold">{formatPrice(last.c)}</text>
     </svg>
   );
 }
@@ -520,15 +586,15 @@ function OrderBook({ price }) {
       {asks.map((a, i) => (
         <div key={i} className="relative flex justify-between px-1 py-[3px]">
           <div className="absolute right-0 top-0 h-full bg-[#3a1219]" style={{ width: `${(a.qty / maxQty) * 100}%` }} />
-          <span className="relative text-[#f6465d]">{a.p.toFixed(6)}</span>
+          <span className="relative text-[#f6465d]">{formatPrice(a.p)}</span>
           <span className="relative text-[#c9d1d9]">{a.qty.toLocaleString()}</span>
         </div>
       ))}
-      <div className="text-center py-1.5 text-sm font-bold text-[#f6465d] border-y border-[#1a1f2b] my-0.5">{price.toFixed(6)}</div>
+      <div className="text-center py-1.5 text-sm font-bold text-[#f6465d] border-y border-[#1a1f2b] my-0.5">{formatPrice(price)}</div>
       {bids.map((b, i) => (
         <div key={i} className="relative flex justify-between px-1 py-[3px]">
           <div className="absolute right-0 top-0 h-full bg-[#10203a]" style={{ width: `${(b.qty / maxQty) * 100}%` }} />
-          <span className="relative text-[#3b82f6]">{b.p.toFixed(6)}</span>
+          <span className="relative text-[#3b82f6]">{formatPrice(b.p)}</span>
           <span className="relative text-[#c9d1d9]">{b.qty.toLocaleString()}</span>
         </div>
       ))}
@@ -555,7 +621,8 @@ export default function App() {
 
   const [balance, setBalance] = useState(START_BALANCE_USDOG);
   const [sogHolding, setSogHolding] = useState(0); // 보유 SOG 현물 (포지션과 별개, 레버리지 없음)
-  const [position, setPosition] = useState(null); // {side, size, entry, leverage, margin, mode}
+  const [positions, setPositions] = useState([]); // [{id, side, size, entry, leverage, margin, mode}]
+  const [hedgeMode, setHedgeMode] = useState(false); // 양방향 포지션 허용 토글
   const [tradeMarkers, setTradeMarkers] = useState([]); // {idx, price, type: "buy"|"sell", side}
   const [leverage, setLeverage] = useState(12.5);
   const [marginMode, setMarginMode] = useState("cross"); // "cross" | "isolated"
@@ -595,37 +662,67 @@ export default function App() {
 
   const pushLog = (msg, tone) => setLog((l) => [{ msg, tone, id: Date.now() + Math.random() }, ...l.slice(0, 19)]);
 
-  const liqPrice = position
-    ? position.mode === "isolated"
-      ? position.side === "long" ? position.entry * (1 - 0.98 / position.leverage) : position.entry * (1 + 0.98 / position.leverage)
-      : position.side === "long" ? position.entry * (1 - 1 / position.leverage) : position.entry * (1 + 1 / position.leverage)
-    : null;
+  // 청산가 계산: 격리는 증거금 100% 손실 근접 시, 교차는 전체 계좌자산이 유지증거금에 닿을 때
+  // (교차는 잔고까지 담보이므로 "가격만으로" 정확한 청산가를 못 박기 어려워, 매틱 실시간 검사로 처리)
+  function calcIsolatedLiqPrice(pos) {
+    const mmr = maintenanceMarginRate(pos.leverage);
+    // 격리: 증거금 대비 (1 - mmr) 만큼 손실나면 청산 (실제 거래소 근사식)
+    const lossRatio = (1 - mmr) / pos.leverage;
+    return pos.side === "long" ? pos.entry * (1 - lossRatio) : pos.entry * (1 + lossRatio);
+  }
 
-  const pnl = position ? (position.side === "long" ? (price - position.entry) * position.size : (position.entry - price) * position.size) : 0;
-  const pnlPct = position ? (pnl / position.margin) * 100 : 0;
+  const positionPnl = (pos, curPrice) =>
+    pos.side === "long" ? (curPrice - pos.entry) * pos.size : (pos.entry - curPrice) * pos.size;
 
   useEffect(() => {
-    if (!position) return;
-    const hit = position.side === "long" ? price <= liqPrice : price >= liqPrice;
-    if (hit) {
-      pushLog(`💥 청산 · ${position.side.toUpperCase()} ${position.leverage}x (${position.mode === "isolated" ? "격리" : "교차"}) · 증거금 ${position.margin.toFixed(2)} USDOG 손실`, "bad");
-      setTradeMarkers((m) => [...m, { idx: candles[candles.length - 1].t, price, type: "liquidation", side: position.side }]);
-      // 실제 거래소처럼 모달 없이 조용히 포지션만 사라짐 (잔고는 그대로, 이미 증거금은 차감된 상태)
-      setPosition(null);
+    if (positions.length === 0) return;
+    const toLiquidate = [];
+    for (const pos of positions) {
+      const pnlNow = positionPnl(pos, price);
+      if (pos.mode === "isolated") {
+        const liq = calcIsolatedLiqPrice(pos);
+        const hit = pos.side === "long" ? price <= liq : price >= liq;
+        if (hit) toLiquidate.push(pos);
+      } else {
+        // 교차: 계좌 전체 자산(잔고 + 모든 교차포지션 평가손익 합)이 유지증거금 이하로 떨어지면 청산
+        const mmr = maintenanceMarginRate(pos.leverage);
+        const notional = pos.size * price;
+        const maintenanceMargin = notional * mmr;
+        const crossEquity = balance + positions.filter(p => p.mode === "cross").reduce((sum, p) => sum + positionPnl(p, price), 0);
+        if (crossEquity <= maintenanceMargin) toLiquidate.push(pos);
+      }
+    }
+    if (toLiquidate.length > 0) {
+      toLiquidate.forEach((pos) => {
+        pushLog(`💥 청산 · ${pos.side.toUpperCase()} ${pos.leverage}x (${pos.mode === "isolated" ? "격리" : "교차"}) · 증거금 ${pos.margin.toFixed(2)} USDOG 손실`, "bad");
+        setTradeMarkers((m) => [...m, { idx: candles[candles.length - 1].t, price, type: "liquidation", side: pos.side }]);
+      });
+      setPositions((prev) => prev.filter((p) => !toLiquidate.includes(p)));
       setFlashLiquidation(true);
       setTimeout(() => setFlashLiquidation(false), 500);
     }
-  }, [price, position, liqPrice]);
+  }, [price, positions, balance]);
 
   const margin = Number(marginInput) || 0;
-  const totalEquityUsdog = balance + (position ? position.margin + pnl : 0) + sogHolding * price;
+  const totalPositionsValue = positions.reduce((sum, p) => sum + p.margin + positionPnl(p, price), 0);
+  const totalEquityUsdog = balance + totalPositionsValue + sogHolding * price;
   const totalEquityKrw = totalEquityUsdog * KRW_PER_USDOG;
 
+  const marginCap = LEVERAGE_MARGIN_CAP[leverage] ?? Infinity;
+  const hasLong = positions.some((p) => p.side === "long");
+  const hasShort = positions.some((p) => p.side === "short");
+  const canOpen = (side) => {
+    if (!hedgeMode && positions.length > 0) return false; // 단방향: 이미 포지션 있으면 불가
+    if (hedgeMode && ((side === "long" && hasLong) || (side === "short" && hasShort))) return false; // 같은 방향 중복 방지
+    return true;
+  };
+
   const openPosition = (side) => {
-    if (position || liquidated || margin <= 0 || margin > balance) return;
+    if (!canOpen(side) || margin <= 0 || margin > balance) return;
+    if (margin > marginCap) return;
     const size = (margin * leverage) / price;
     setBalance((b) => b - margin);
-    setPosition({ side, size, entry: price, leverage, margin, mode: marginMode });
+    setPositions((prev) => [...prev, { id: Date.now() + Math.random(), side, size, entry: price, leverage, margin, mode: marginMode }]);
     orderFlowRef.current.pending += side === "long" ? 1 : -1;
     pushLog(`${side === "long" ? "Long" : "Short"} 진입 · ${leverage}x · ${marginMode === "isolated" ? "격리" : "교차"} · ${margin} USDOG`, side === "long" ? "good" : "bad");
     setTradeMarkers((m) => [...m, { idx: candles[candles.length - 1].t, price, type: "entry", side }]);
@@ -636,27 +733,31 @@ export default function App() {
 
   // 불타기(추가 증거금 투입) — 교차 모드에서만 허용
   const [addMarginInput, setAddMarginInput] = useState("");
+  const [addMarginTargetId, setAddMarginTargetId] = useState(null);
   const addMargin = () => {
     const amt = Number(addMarginInput) || 0;
-    if (!position || position.mode !== "cross" || amt <= 0 || amt > balance) return;
+    const target = positions.find((p) => p.id === addMarginTargetId);
+    if (!target || target.mode !== "cross" || amt <= 0 || amt > balance) return;
     setBalance((b) => b - amt);
-    setPosition((p) => ({ ...p, margin: p.margin + amt }));
-    pushLog(`🔥 불타기 · 증거금 ${amt} USDOG 추가 (총 ${(position.margin + amt).toFixed(2)} USDOG)`, "neutral");
+    setPositions((prev) => prev.map((p) => (p.id === target.id ? { ...p, margin: p.margin + amt } : p)));
+    pushLog(`🔥 불타기 · 증거금 ${amt} USDOG 추가 (총 ${(target.margin + amt).toFixed(2)} USDOG)`, "neutral");
     setAddMarginInput("");
   };
 
-  const closePosition = () => {
-    if (!position) return;
-    setBalance((b) => b + position.margin + pnl);
-    orderFlowRef.current.pending += position.side === "long" ? -0.7 : 0.7;
-    pushLog(`포지션 종료 · ${pnl >= 0 ? "+" : ""}${pnl.toFixed(2)} USDOG`, pnl >= 0 ? "good" : "bad");
-    setTradeMarkers((m) => [...m, { idx: candles[candles.length - 1].t, price, type: "exit", side: position.side }]);
-    setPosition(null);
+  const closePosition = (posId) => {
+    const pos = positions.find((p) => p.id === posId);
+    if (!pos) return;
+    const pnlNow = positionPnl(pos, price);
+    setBalance((b) => b + pos.margin + pnlNow);
+    orderFlowRef.current.pending += pos.side === "long" ? -0.7 : 0.7;
+    pushLog(`포지션 종료 · ${pnlNow >= 0 ? "+" : ""}${pnlNow.toFixed(2)} USDOG`, pnlNow >= 0 ? "good" : "bad");
+    setTradeMarkers((m) => [...m, { idx: candles[candles.length - 1].t, price, type: "exit", side: pos.side }]);
+    setPositions((prev) => prev.filter((p) => p.id !== posId));
   };
 
   const instantRefill = () => {
     setBalance((b) => b + START_BALANCE_USDOG);
-    pushLog("🎁 코인 리필 · 1000 USDOG 지급", "neutral");
+    pushLog(`🎁 코인 리필 · ${START_BALANCE_USDOG} USDOG 지급`, "neutral");
   };
 
   // ============ SOG ↔ USDOG 컨버트 (현재 시세 기준) ============
@@ -877,7 +978,7 @@ export default function App() {
       )}
 
       <div className="border-b border-[#131722]" style={{ height: 400 }}>
-        <TradingChart allCandles={candles} liqPrice={liqPrice} entryPrice={position?.entry} drawings={drawings} onAddPoint={handleAddPoint} drawMode={drawMode} viewStart={viewStart} viewCount={viewCount} onPan={handlePan} vZoom={vZoom} onZoomH={(dir) => (dir > 0 ? zoomIn() : zoomOut())} onZoomV={(dir) => (dir > 0 ? vZoomIn() : vZoomOut())} onSetViewCount={setViewCount} tradeMarkers={tradeMarkers} />
+        <TradingChart allCandles={candles} entryLines={positions.map((p) => ({ entry: p.entry, liq: p.mode === "isolated" ? calcIsolatedLiqPrice(p) : null }))} drawings={drawings} onAddPoint={handleAddPoint} drawMode={drawMode} viewStart={viewStart} viewCount={viewCount} onPan={handlePan} vZoom={vZoom} onZoomH={(dir) => (dir > 0 ? zoomIn() : zoomOut())} onZoomV={(dir) => (dir > 0 ? vZoomIn() : vZoomOut())} onSetViewCount={setViewCount} tradeMarkers={tradeMarkers} />
       </div>
       <div className="border-b border-[#131722]" style={{ height: 60 }}><VolumePanel allCandles={candles} viewStart={viewStart} viewCount={viewCount} /></div>
       <div className="border-b border-[#131722]" style={{ height: 90 }}><RsiPanel allCandles={candles} viewStart={viewStart} viewCount={viewCount} /></div>
@@ -913,7 +1014,7 @@ export default function App() {
         </div>
         <div className="text-[10px] text-[#5b6472] flex justify-between mb-1.5">
           <span>{t.convertHolding}: {convertMode === "toSog" ? `${balance.toFixed(2)} USDOG` : `${sogHolding.toFixed(4)} SOG`}</span>
-          <span>{t.convertPrice} {price.toFixed(6)}</span>
+          <span>{t.convertPrice} {formatPrice(price)}</span>
         </div>
         <div className="flex gap-2 mb-2">
           <input
@@ -956,59 +1057,68 @@ export default function App() {
       <div className="grid grid-cols-5 gap-0 border-b border-[#131722]">
         <div className="col-span-3 p-3 flex flex-col gap-2.5 border-r border-[#131722]">
           <div className="flex gap-2">
-            <select value={leverage} onChange={(e) => setLeverage(Number(e.target.value))} disabled={!!position || liquidated} className="flex-1 bg-[#131722] border border-[#1a1f2b] rounded px-2 py-1.5 text-xs font-mono">
-              {[1, 5, 10, 12.5, 25, 50, 75, 100].map((l) => <option key={l} value={l}>{l}x</option>)}
+            <select value={leverage} onChange={(e) => setLeverage(Number(e.target.value))} className="flex-1 bg-[#131722] border border-[#1a1f2b] rounded px-2 py-1.5 text-xs font-mono">
+              {[1, 2, 3, 5, 10, 20, 50, 75, 100].map((l) => <option key={l} value={l}>{l}x</option>)}
             </select>
             <div className="flex-1 flex rounded overflow-hidden border border-[#1a1f2b]">
               <button
                 onClick={() => setMarginMode("cross")}
-                disabled={!!position || liquidated}
                 className={`flex-1 text-[11px] font-semibold ${marginMode === "cross" ? "bg-[#e8b339] text-black" : "bg-[#131722] text-[#5b6472]"}`}
               >{t.cross}</button>
               <button
                 onClick={() => setMarginMode("isolated")}
-                disabled={!!position || liquidated}
                 className={`flex-1 text-[11px] font-semibold ${marginMode === "isolated" ? "bg-[#e8b339] text-black" : "bg-[#131722] text-[#5b6472]"}`}
               >{t.isolated}</button>
             </div>
           </div>
+
+          <button
+            onClick={() => setHedgeMode((v) => !v)}
+            className={`flex items-center justify-between px-2.5 py-1.5 rounded border text-[10.5px] font-semibold ${hedgeMode ? "bg-[#e8b339]/15 border-[#e8b339] text-[#e8b339]" : "bg-[#131722] border-[#1a1f2b] text-[#5b6472]"}`}
+          >
+            <span>양방향 포지션 (헤지모드)</span>
+            <span className={`w-8 h-4 rounded-full relative transition-colors ${hedgeMode ? "bg-[#e8b339]" : "bg-[#3a4658]"}`}>
+              <span className={`absolute top-0.5 w-3 h-3 rounded-full bg-black transition-all ${hedgeMode ? "left-4" : "left-0.5"}`} />
+            </span>
+          </button>
 
           <div className="text-[11px] text-[#5b6472] flex justify-between">
             <span>{t.available}</span>
             <span className="font-mono text-[#c9d1d9]">{balance.toFixed(2)} USDOG</span>
           </div>
 
-          <input type="number" value={marginInput} onChange={(e) => setMarginInput(e.target.value)} placeholder={t.marginPlaceholder} disabled={!!position || liquidated}
+          <input type="number" value={marginInput} onChange={(e) => setMarginInput(e.target.value)} placeholder={t.marginPlaceholder}
             className="w-full bg-[#131722] border border-[#1a1f2b] rounded px-3 py-2 text-sm font-mono focus:outline-none focus:border-[#3a4658]" />
           <div className="flex gap-1.5">
             {[0.25, 0.5, 0.75, 1].map((p) => (
-              <button key={p} onClick={() => setMarginInput(String(Math.floor(balance * p)))} disabled={!!position || liquidated} className="flex-1 text-[10px] bg-[#131722] hover:bg-[#1a1f2b] rounded py-1 disabled:opacity-40">{p * 100}%</button>
+              <button key={p} onClick={() => setMarginInput(String(Math.min(marginCap, Math.floor(balance * p))))} className="flex-1 text-[10px] bg-[#131722] hover:bg-[#1a1f2b] rounded py-1">{p * 100}%</button>
             ))}
           </div>
 
-          {position && (
-            <div className="text-[10px] text-[#5b6472] flex justify-between font-mono">
-              <span>{t.liqPrice} ({position.mode === "isolated" ? t.isolated : t.cross})</span>
-              <span className="text-[#f6465d]">{liqPrice.toFixed(6)}</span>
-            </div>
-          )}
+          <div className="text-[10px] text-[#5b6472] flex justify-between font-mono">
+            <span>레버리지 {leverage}x 최대 증거금</span>
+            <span className={margin > marginCap ? "text-[#f6465d]" : "text-[#8b96a5]"}>{marginCap === Infinity ? "무제한" : `${marginCap} USDOG`}</span>
+          </div>
 
           <div className="grid grid-cols-2 gap-2 mt-1">
             <button
               onClick={() => openPosition("long")}
-              disabled={!!position || liquidated || margin <= 0 || margin > balance}
+              disabled={!canOpen("long") || margin <= 0 || margin > balance || margin > marginCap}
               className={`bg-[#f6465d] hover:bg-[#e03350] disabled:opacity-30 disabled:cursor-not-allowed text-white font-bold py-3 rounded-lg flex items-center justify-center gap-1.5 transition-all active:scale-95 ${clickFx === "long" ? "ring-2 ring-white" : ""}`}
             >
               <TrendingUp size={15} /> {t.long}
             </button>
             <button
               onClick={() => openPosition("short")}
-              disabled={!!position || liquidated || margin <= 0 || margin > balance}
+              disabled={!canOpen("short") || margin <= 0 || margin > balance || margin > marginCap}
               className={`bg-[#3b82f6] hover:bg-[#2f6fd6] disabled:opacity-30 disabled:cursor-not-allowed text-white font-bold py-3 rounded-lg flex items-center justify-center gap-1.5 transition-all active:scale-95 ${clickFx === "short" ? "ring-2 ring-white" : ""}`}
             >
               <TrendingDown size={15} /> {t.short}
             </button>
           </div>
+          {!hedgeMode && positions.length > 0 && (
+            <div className="text-[9.5px] text-[#3a4658]">단방향 모드에서는 포지션을 하나만 보유할 수 있어요. 여러 방향을 동시에 잡으려면 위 토글을 켜세요.</div>
+          )}
         </div>
         <div className="col-span-2 p-2"><OrderBook price={price} /></div>
       </div>
@@ -1017,66 +1127,78 @@ export default function App() {
         <span>{t.warningBanner}</span>
       </div>
 
-      {/* Position PnL — big visible card */}
-      {position && (
-        <div className="mx-3 mt-3 rounded-xl border border-[#1a1f2b] overflow-hidden">
-          <div className={`px-4 py-3 flex items-center justify-between ${pnl >= 0 ? "bg-gradient-to-r from-[#1a0a0d] to-[#0d1117]" : "bg-gradient-to-r from-[#0a1220] to-[#0d1117]"}`}>
-            <div className="flex items-center gap-2">
-              <span className={`px-2 py-0.5 rounded text-[11px] font-bold ${position.side === "long" ? "bg-[#f6465d]/20 text-[#f6465d]" : "bg-[#3b82f6]/20 text-[#3b82f6]"}`}>
-                {position.side === "long" ? "LONG" : "SHORT"} {position.leverage}x
+      {/* Position PnL cards — one per open position */}
+      {positions.map((pos) => {
+        const pnlNow = positionPnl(pos, price);
+        const pnlPctNow = (pnlNow / pos.margin) * 100;
+        const liqP = pos.mode === "isolated" ? calcIsolatedLiqPrice(pos) : null;
+        return (
+          <div key={pos.id} className="mx-3 mt-3 rounded-xl border border-[#1a1f2b] overflow-hidden">
+            <div className={`px-4 py-3 flex items-center justify-between ${pnlNow >= 0 ? "bg-gradient-to-r from-[#1a0a0d] to-[#0d1117]" : "bg-gradient-to-r from-[#0a1220] to-[#0d1117]"}`}>
+              <div className="flex items-center gap-2">
+                <span className={`px-2 py-0.5 rounded text-[11px] font-bold ${pos.side === "long" ? "bg-[#f6465d]/20 text-[#f6465d]" : "bg-[#3b82f6]/20 text-[#3b82f6]"}`}>
+                  {pos.side === "long" ? "LONG" : "SHORT"} {pos.leverage}x
+                </span>
+                <span className="text-[10px] text-[#5b6472]">{pos.mode === "isolated" ? t.isolated : t.cross}</span>
+              </div>
+              <button onClick={() => closePosition(pos.id)} className="bg-[#1a1f2b] hover:bg-[#232a38] text-[11px] font-semibold px-3 py-1.5 rounded flex items-center gap-1"><X size={11} /> {t.close}</button>
+            </div>
+            <div className="px-4 py-3 flex items-center justify-between">
+              <span className="text-[11px] text-[#5b6472]">{t.pnl}</span>
+              <span className={`font-mono font-black text-2xl ${pnlNow >= 0 ? "text-[#f6465d]" : "text-[#3b82f6]"}`}>
+                {pnlNow >= 0 ? "+" : ""}{pnlNow.toFixed(2)} <span className="text-sm">USDOG</span>
               </span>
-              <span className="text-[10px] text-[#5b6472]">{position.mode === "isolated" ? t.isolated : t.cross}</span>
             </div>
-            <button onClick={closePosition} className="bg-[#1a1f2b] hover:bg-[#232a38] text-[11px] font-semibold px-3 py-1.5 rounded flex items-center gap-1"><X size={11} /> {t.close}</button>
-          </div>
-          <div className="px-4 py-3 flex items-center justify-between">
-            <span className="text-[11px] text-[#5b6472]">{t.pnl}</span>
-            <span className={`font-mono font-black text-2xl ${pnl >= 0 ? "text-[#f6465d]" : "text-[#3b82f6]"}`}>
-              {pnl >= 0 ? "+" : ""}{pnl.toFixed(2)} <span className="text-sm">USDOG</span>
-            </span>
-          </div>
-          <div className="px-4 pb-3 flex justify-between text-[11px]">
-            <span className="text-[#5b6472]">{t.pnlPct}</span>
-            <span className={`font-mono font-bold ${pnlPct >= 0 ? "text-[#f6465d]" : "text-[#3b82f6]"}`}>{pnlPct >= 0 ? "+" : ""}{pnlPct.toFixed(1)}%</span>
-          </div>
-          <div className="px-4 pb-3 flex justify-between text-[11px] font-mono">
-            <span className="text-[#5b6472]">{t.marginLiq}</span>
-            <span>{position.margin.toFixed(2)} USDOG · <span className="text-[#f6465d]">{liqPrice.toFixed(6)}</span></span>
-          </div>
-          {position.mode === "cross" && (
-            <div className="px-4 pb-4 pt-1 border-t border-[#1a1f2b] flex gap-2 items-center">
-              <input
-                type="number"
-                value={addMarginInput}
-                onChange={(e) => setAddMarginInput(e.target.value)}
-                placeholder={t.addMarginPlaceholder}
-                className="flex-1 bg-[#131722] border border-[#1a1f2b] rounded px-2.5 py-1.5 text-xs font-mono focus:outline-none focus:border-[#3a4658]"
-              />
-              <button
-                onClick={addMargin}
-                disabled={Number(addMarginInput) <= 0 || Number(addMarginInput) > balance}
-                className="bg-[#e8b339] hover:bg-[#f0c257] disabled:opacity-30 disabled:cursor-not-allowed text-black text-xs font-bold px-3 py-1.5 rounded whitespace-nowrap"
-              >
-                {t.addMarginButton}
-              </button>
+            <div className="px-4 pb-3 flex justify-between text-[11px]">
+              <span className="text-[#5b6472]">{t.pnlPct}</span>
+              <span className={`font-mono font-bold ${pnlPctNow >= 0 ? "text-[#f6465d]" : "text-[#3b82f6]"}`}>{pnlPctNow >= 0 ? "+" : ""}{pnlPctNow.toFixed(1)}%</span>
             </div>
-          )}
-          {position.mode === "isolated" && (
-            <div className="px-4 pb-3 text-[9.5px] text-[#3a4658]">{t.isolatedNotice}</div>
-          )}
-        </div>
-      )}
+            <div className="px-4 pb-3 flex justify-between text-[11px] font-mono">
+              <span className="text-[#5b6472]">{pos.mode === "isolated" ? t.marginLiq : "증거금 / 청산조건"}</span>
+              <span>
+                {pos.margin.toFixed(2)} USDOG ·{" "}
+                {pos.mode === "isolated" ? (
+                  <span className="text-[#f6465d]">{formatPrice(liqP)}</span>
+                ) : (
+                  <span className="text-[#f6465d]">계좌자산 기준 실시간 판정</span>
+                )}
+              </span>
+            </div>
+            {pos.mode === "cross" && (
+              <div className="px-4 pb-4 pt-1 border-t border-[#1a1f2b] flex gap-2 items-center">
+                <input
+                  type="number"
+                  value={addMarginTargetId === pos.id ? addMarginInput : ""}
+                  onChange={(e) => { setAddMarginTargetId(pos.id); setAddMarginInput(e.target.value); }}
+                  placeholder={t.addMarginPlaceholder}
+                  className="flex-1 bg-[#131722] border border-[#1a1f2b] rounded px-2.5 py-1.5 text-xs font-mono focus:outline-none focus:border-[#3a4658]"
+                />
+                <button
+                  onClick={() => { setAddMarginTargetId(pos.id); addMargin(); }}
+                  disabled={addMarginTargetId !== pos.id || Number(addMarginInput) <= 0 || Number(addMarginInput) > balance}
+                  className="bg-[#e8b339] hover:bg-[#f0c257] disabled:opacity-30 disabled:cursor-not-allowed text-black text-xs font-bold px-3 py-1.5 rounded whitespace-nowrap"
+                >
+                  {t.addMarginButton}
+                </button>
+              </div>
+            )}
+            {pos.mode === "isolated" && (
+              <div className="px-4 pb-3 text-[9.5px] text-[#3a4658]">{t.isolatedNotice}</div>
+            )}
+          </div>
+        );
+      })}
 
       <div className="flex gap-4 px-3 mt-3 border-b border-[#131722] text-[13px]">
         {["positions", "log"].map((tabKey) => (
           <button key={tabKey} onClick={() => setTab(tabKey)} className={`pb-2 ${tab === tabKey ? "text-white border-b-2 border-[#e8b339] font-semibold" : "text-[#5b6472]"}`}>
-            {tabKey === "positions" ? `${t.tabPositions}(${position ? 1 : 0})` : t.tabLog}
+            {tabKey === "positions" ? `${t.tabPositions}(${positions.length})` : t.tabLog}
           </button>
         ))}
       </div>
 
       <div className="p-3">
-        {tab === "positions" && !position && <div className="text-center text-[#3a4658] text-xs py-6">{t.noPosition}</div>}
+        {tab === "positions" && positions.length === 0 && <div className="text-center text-[#3a4658] text-xs py-6">{t.noPosition}</div>}
         {tab === "log" && (
           <div className="flex flex-col gap-1 max-h-40 overflow-y-auto">
             {log.length === 0 && <div className="text-[#3a4658] text-xs py-4 text-center">{t.noLog}</div>}
@@ -1106,18 +1228,18 @@ export default function App() {
               </div>
 
               <div>
-                <div className="flex justify-between"><span className="text-[#5b6472]">{t.startPrice}</span><span>{START_PRICE.toFixed(6)} USDOG</span></div>
+                <div className="flex justify-between"><span className="text-[#5b6472]">{t.startPrice}</span><span>{formatPrice(START_PRICE)} USDOG</span></div>
                 <div className="flex justify-between text-[10px] text-[#5b6472] mt-0.5">
                   <span></span>
-                  <span>≈ ${START_PRICE.toFixed(6)} USD · ₩{(START_PRICE * KRW_PER_USDOG).toFixed(2)} KRW</span>
+                  <span>≈ ${formatPrice(START_PRICE)} USD · ₩{(START_PRICE * KRW_PER_USDOG).toFixed(4)} KRW</span>
                 </div>
               </div>
 
               <div>
-                <div className="flex justify-between"><span className="text-[#5b6472]">{t.currentPrice}</span><span className="text-[#e8b339]">{price.toFixed(6)} USDOG</span></div>
+                <div className="flex justify-between"><span className="text-[#5b6472]">{t.currentPrice}</span><span className="text-[#e8b339]">{formatPrice(price)} USDOG</span></div>
                 <div className="flex justify-between text-[10px] text-[#5b6472] mt-0.5">
                   <span></span>
-                  <span>≈ ${price.toFixed(6)} USD · ₩{(price * KRW_PER_USDOG).toFixed(2)} KRW</span>
+                  <span>≈ ${formatPrice(price)} USD · ₩{(price * KRW_PER_USDOG).toFixed(4)} KRW</span>
                 </div>
               </div>
 
