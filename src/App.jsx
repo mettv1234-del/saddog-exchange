@@ -59,8 +59,56 @@ const DIFFICULTY_PRESETS = {
   easy:    { volMult: 0.6, userInfluence: 0.020, fakeoutChance: 0.00, label: "쉬움" },
   normal:  { volMult: 1.0, userInfluence: 0.008, fakeoutChance: 0.05, label: "보통" },
   hard:    { volMult: 1.6, userInfluence: 0.003, fakeoutChance: 0.15, label: "어려움" },
-  extreme: { volMult: 2.6, userInfluence: 0.0008, fakeoutChance: 0.30, label: "극한" },
+  extreme: { volMult: 4.5, userInfluence: 0.0002, fakeoutChance: 0.45, label: "극한" },
 };
+
+function rndInt(n) { return Math.floor(Math.random() * n); }
+function rndRange(a, b) { return a + Math.random() * (b - a); }
+function pick(arr) { return arr[rndInt(arr.length)]; }
+
+// 국면(phase) 재료 라이브러리 — 이 조각들을 무작위로 조합해서 실질적으로 수백~수천 가지의
+// 서로 다른 파동 시퀀스를 만든다. 사람이 100개를 일일이 정의하는 대신 "조합 폭발"로 예측 불가능성을 확보.
+function makePhase(kind) {
+  switch (kind) {
+    case "surge":       return { ticks: 8 + rndInt(22), mult: rndRange(1.15, 2.8), vol: rndRange(0.8, 1.4) };
+    case "microSurge":   return { ticks: 4 + rndInt(8), mult: rndRange(1.05, 1.3), vol: rndRange(0.6, 1.0) };
+    case "dip":          return { ticks: 6 + rndInt(16), mult: rndRange(0.45, 0.9), vol: rndRange(0.7, 1.3) };
+    case "microDip":     return { ticks: 3 + rndInt(6), mult: rndRange(0.75, 0.96), vol: rndRange(0.5, 0.9) };
+    case "chop":         return { ticks: 6 + rndInt(18), mult: rndRange(0.9, 1.11), vol: rndRange(0.9, 1.8), choppy: true };
+    case "quietRange":   return { ticks: 8 + rndInt(20), mult: rndRange(0.97, 1.03), vol: rndRange(0.2, 0.45) };
+    case "burst":        return { ticks: 10 + rndInt(20), mult: rndRange(2.2, 7), vol: rndRange(2.0, 3.2) };
+    case "crash":        return { ticks: 8 + rndInt(16), mult: rndRange(0.15, 0.5), vol: rndRange(2.2, 3.4) };
+    case "wickyChop":    return { ticks: 5 + rndInt(14), mult: rndRange(0.92, 1.08), vol: rndRange(1.6, 2.6), choppy: true };
+    case "slowDrift":    return { ticks: 15 + rndInt(30), mult: rndRange(1.05, 1.4), vol: rndRange(0.4, 0.7) };
+    case "slowFade":     return { ticks: 15 + rndInt(30), mult: rndRange(0.65, 0.95), vol: rndRange(0.4, 0.7) };
+    default:              return { ticks: 10, mult: 1, vol: 1 };
+  }
+}
+
+const UP_PHASE_KINDS = ["surge", "microSurge", "burst", "slowDrift"];
+const DOWN_PHASE_KINDS = ["dip", "microDip", "crash", "slowFade"];
+const NEUTRAL_PHASE_KINDS = ["chop", "quietRange", "wickyChop"];
+
+// 완전히 무작위 조합으로 국면 시퀀스를 생성 (개수/순서/방향이 매번 달라짐 → 사실상 무한에 가까운 패턴 수)
+function generatePhaseSequence() {
+  const phaseCount = 4 + rndInt(9); // 4~12개 국면을 무작위로 이어붙임
+  const seq = [];
+  let lastWasDirectional = false;
+  for (let i = 0; i < phaseCount; i++) {
+    const roll = Math.random();
+    let kind;
+    if (roll < 0.34) kind = pick(UP_PHASE_KINDS);
+    else if (roll < 0.68) kind = pick(DOWN_PHASE_KINDS);
+    else kind = pick(NEUTRAL_PHASE_KINDS);
+    seq.push(makePhase(kind));
+    lastWasDirectional = kind !== "chop" && kind !== "quietRange" && kind !== "wickyChop";
+  }
+  // 절반 확률로 마지막에 강한 마무리(버스트/크래시) 추가
+  if (Math.random() < 0.5) {
+    seq.push(makePhase(Math.random() < 0.5 ? "burst" : "crash"));
+  }
+  return seq;
+}
 
 function useEngine(orderFlowRef, difficulty) {
   const [candles, setCandles] = useState(() =>
@@ -69,11 +117,10 @@ function useEngine(orderFlowRef, difficulty) {
       v: 1000 + Math.random() * 500, t: i,
     }))
   );
-  const [eventLabel, setEventLabel] = useState(null);
   const sRef = useRef({
     price: START_PRICE, momentum: 0, tick: 0, pendingFlow: [],
-    event: null, // 빅이벤트 상태머신: {pattern, phase, phaseIdx, phases:[...], startPrice, dir}
-    megaEventTicks: 0, megaEventTotalTicks: 0, megaEventDir: 0, megaEventStrength: 0,
+    seq: null, seqIdx: 0, // 국면 시퀀스 상태머신 (배너 없이 내부적으로만 동작)
+    megaEventTicks: 0, megaEventTotalTicks: 0, megaEventStrength: 0,
   });
   const diffRef = useRef(difficulty);
   diffRef.current = difficulty;
@@ -83,53 +130,26 @@ function useEngine(orderFlowRef, difficulty) {
       const s = sRef.current;
       const preset = DIFFICULTY_PRESETS[diffRef.current] || DIFFICULTY_PRESETS.normal;
 
-      // 빅이벤트 발동: 패턴1(이중바닥 박스권 브레이크아웃) 또는 패턴2(계단식 지그재그) 중 무작위 선택
-      if (!s.event && s.megaEventTicks <= 0 && Math.random() < 0.0022 * preset.volMult) {
-        const dir = Math.random() < 0.5 ? 1 : -1;
-        const patternType = Math.random() < 0.5 ? 1 : 2;
-        const startPrice = s.price;
-
-        if (patternType === 1) {
-          // 패턴1: 고점 찍고 조정 → 더 낮은(높은) 고점 → 비슷한 저점 재터치 → 횡보 → 강한 브레이크아웃
-          const legMult = 1.4 + Math.random() * 2.2; // 첫 다리 강도
-          s.event = {
-            pattern: 1, dir, startPrice, phaseIdx: 0,
-            phases: [
-              { name: "leg1", ticks: 18 + rndInt(12), mult: legMult, vol: 1.0 },        // 첫 상승/하락
-              { name: "pullback1", ticks: 12 + rndInt(10), mult: 1 / (legMult * 0.55), vol: 0.6 }, // 조정 (완전히 되돌리지 않음)
-              { name: "leg2", ticks: 14 + rndInt(10), mult: legMult * 0.7, vol: 1.0 },  // 이전 고점보다 낮게 재상승
-              { name: "retest", ticks: 10 + rndInt(8), mult: 1 / (legMult * 0.62), vol: 0.6 }, // 비슷한 저점 재터치
-              { name: "range", ticks: 14 + rndInt(14), mult: 1.02, vol: 0.35 },          // 횡보 (낮은 변동성)
-              { name: "breakout", ticks: 20 + rndInt(20), mult: 3.0 + Math.random() * 4, vol: 2.6 }, // 강한 브레이크아웃
-            ],
-          };
-        } else {
-          // 패턴2: 저점/고점을 계단식으로 계속 높이며(낮추며) 지그재그 → 마지막 50:50 방향 → 폭발 가속
-          const steps = 3 + rndInt(3);
-          const phases = [];
-          for (let i = 0; i < steps; i++) {
-            phases.push({ name: `up${i}`, ticks: 10 + rndInt(8), mult: 1.3 + Math.random() * 0.9, vol: 1.0 });
-            phases.push({ name: `pull${i}`, ticks: 8 + rndInt(6), mult: 1 / (1.15 + Math.random() * 0.4), vol: 0.5 });
-          }
-          const finalDir = Math.random() < 0.5 ? dir : -dir; // 지그재그 끝에 50:50으로 최종 방향 결정
-          phases.push({ name: "range", ticks: 10 + rndInt(10), mult: 1.01, vol: 0.3 });
-          phases.push({ name: "explode", ticks: 20 + rndInt(18), mult: 3.5 + Math.random() * 4.5, vol: 2.8, overrideDir: finalDir });
-          s.event = { pattern: 2, dir, startPrice, phaseIdx: 0, phases };
-        }
-        emitEventLabel(s);
+      // 새 파동 시퀀스 시작 (조합형 — 매번 다른 개수/방향/강도의 국면들)
+      if (!s.seq && s.megaEventTicks <= 0 && Math.random() < 0.006 * preset.volMult) {
+        s.seq = generatePhaseSequence();
+        s.seqIdx = 0;
       }
 
-      // 메가이벤트: 극히 낮은 확률로 비트코인 가격대까지 폭등하는 초대형 이벤트
-      if (!s.event && s.megaEventTicks <= 0 && Math.random() < 0.00004) {
+      // 메가이벤트: 극히 낮은 확률로 비트코인 가격대까지 폭등하는 초대형 이벤트 (배너 없음)
+      if (!s.seq && s.megaEventTicks <= 0 && Math.random() < 0.00004) {
         s.megaEventTicks = 300 + rndInt(400);
         s.megaEventTotalTicks = s.megaEventTicks;
         const targetPrice = 8000 + Math.random() * 6000;
         const targetMult = targetPrice / s.price;
         s.megaEventStrength = Math.pow(Math.max(1.01, targetMult), 1 / s.megaEventTicks) - 1;
-        setEventLabel("🌕 전설의 불장 · 역대급 강세장 진입");
       }
 
-      let drift = (Math.random() - 0.5) * 0.006 * preset.volMult;
+      // 다층 노이즈: 여러 개의 서로 다른 주기/진폭 랜덤워크를 겹쳐서 예측 불가능성을 강화
+      const n1 = (Math.random() - 0.5) * 0.005 * preset.volMult;
+      const n2 = (Math.random() - 0.5) * 0.0025 * preset.volMult;
+      const n3 = (Math.random() - 0.5) * 0.0012 * preset.volMult;
+      let drift = n1 + n2 * (Math.random() < 0.5 ? 1 : -1) + n3;
 
       // 유저 주문은 즉시 반영하지 않고 큐에 넣어 지연 후 노이즈와 함께 반영
       const flow = orderFlowRef.current;
@@ -152,44 +172,42 @@ function useEngine(orderFlowRef, difficulty) {
 
       const open = s.price;
       let next;
-      let wickMult = 1.8; // 기본(평상시) 꼬리 배율
+      let wickMult = 1.8;
 
       if (s.megaEventTicks > 0) {
         const progress = 1 - s.megaEventTicks / s.megaEventTotalTicks;
-        const wave = Math.sin(progress * Math.PI * 5) * 0.0035 * (1 - progress * 0.5);
-        const finalBurst = progress > 0.85 ? (progress - 0.85) * 0.02 : 0;
-        next = Math.max(PRICE_FLOOR, s.price * (1 + s.megaEventStrength + wave + finalBurst + (Math.random() - 0.5) * 0.0015));
+        const wave = Math.sin(progress * Math.PI * (4 + rndInt(4))) * 0.004 * (1 - progress * 0.4);
+        const finalBurst = progress > 0.85 ? (progress - 0.85) * 0.022 : 0;
+        next = Math.max(PRICE_FLOOR, s.price * (1 + s.megaEventStrength + wave + finalBurst + drift));
         s.megaEventTicks -= 1;
-        wickMult = 2.2;
-        if (s.megaEventTicks === 0) setEventLabel(null);
-      } else if (s.event) {
-        const ph = s.event.phases[s.event.phaseIdx];
+        wickMult = 2.4;
+        if (s.megaEventTicks === 0) s.megaEventTicks = 0;
+      } else if (s.seq) {
+        const ph = s.seq[s.seqIdx];
         if (!ph.ticksLeft) ph.ticksLeft = ph.ticks;
-        const phaseDir = ph.overrideDir !== undefined ? ph.overrideDir : s.event.dir;
-        // 이 phase가 끝날 때까지 mult배 만큼 이동하도록 매틱 증가율 산출
         if (!ph.perTickRate) ph.perTickRate = Math.pow(ph.mult, 1 / ph.ticks) - 1;
-        const noiseScale = 0.0008 * ph.vol;
-        next = Math.max(PRICE_FLOOR, s.price * (1 + phaseDir * ph.perTickRate + (Math.random() - 0.5) * noiseScale * 2));
-        wickMult = 0.6 + ph.vol * 0.9; // 조정/횡보는 꼬리 짧게, 브레이크아웃/폭발은 꼬리 길게
+        // choppy 국면은 매틱 방향을 랜덤하게 뒤집어서 "이리갔다 저리갔다" 하는 느낌을 만듦
+        const tickDir = ph.choppy ? (Math.random() < 0.5 ? 1 : -1) : 1;
+        const noiseScale = 0.0009 * ph.vol;
+        next = Math.max(PRICE_FLOOR, s.price * (1 + tickDir * ph.perTickRate + drift + (Math.random() - 0.5) * noiseScale * 2));
+        wickMult = 0.6 + ph.vol * 0.9;
         ph.ticksLeft -= 1;
         if (ph.ticksLeft <= 0) {
-          s.event.phaseIdx += 1;
-          if (s.event.phaseIdx >= s.event.phases.length) {
-            s.event = null;
-            setEventLabel(null);
-          } else {
-            emitEventLabel(s);
+          s.seqIdx += 1;
+          if (s.seqIdx >= s.seq.length) {
+            s.seq = null;
+            s.seqIdx = 0;
           }
         }
       } else {
-        // 평상시(횡보): 변동성을 살려서 지루하지 않게
-        s.momentum = s.momentum * 0.65 + drift * 0.35;
-        next = Math.max(PRICE_FLOOR, s.price * (1 + s.momentum + drift * 1.6));
-        wickMult = 1.8;
+        // 평상시(횡보): 방향이 수시로 뒤집히는 예측불가 노이즈
+        s.momentum = s.momentum * 0.5 + drift * 0.5 * (Math.random() < 0.15 ? -1.3 : 1);
+        next = Math.max(PRICE_FLOOR, s.price * (1 + s.momentum + drift * 1.8));
+        wickMult = 2.0;
       }
 
-      const high = Math.max(open, next) * (1 + Math.random() * 0.002 * preset.volMult * wickMult);
-      const low = Math.max(PRICE_FLOOR, Math.min(open, next) * (1 - Math.random() * 0.002 * preset.volMult * wickMult));
+      const high = Math.max(open, next) * (1 + Math.random() * 0.0022 * preset.volMult * wickMult);
+      const low = Math.max(PRICE_FLOOR, Math.min(open, next) * (1 - Math.random() * 0.0022 * preset.volMult * wickMult));
       const vol = 300 + Math.abs(drift) * 200000 + Math.random() * 700;
       s.price = next;
       s.tick += 1;
@@ -198,23 +216,7 @@ function useEngine(orderFlowRef, difficulty) {
     return () => clearInterval(id);
   }, [orderFlowRef]);
 
-  function rndInt(n) { return Math.floor(Math.random() * n); }
-  function emitEventLabel(s) {
-    const ph = s.event.phases[s.event.phaseIdx];
-    const labels = {
-      leg1: s.event.dir > 0 ? "🚀 1차 상승 전개" : "🔻 1차 하락 전개",
-      pullback1: "⚖️ 단기 조정 진행 중",
-      leg2: s.event.dir > 0 ? "🚀 2차 상승 시도" : "🔻 2차 하락 시도",
-      retest: "🔁 저점(고점) 재확인 중",
-      range: "😴 횡보 구간 · 방향 탐색 중",
-      breakout: s.event.dir > 0 ? "💥 박스권 강한 상방 돌파" : "💥 박스권 강한 하방 이탈",
-      explode: (ph.overrideDir ?? s.event.dir) > 0 ? "💥 폭발적 상승 가속" : "💥 폭발적 하락 가속",
-    };
-    const key = ph.name.replace(/[0-9]/g, "");
-    setEventLabel(labels[key] || labels[ph.name] || "⚡ 변동성 확대 중");
-  }
-
-  return { candles, eventLabel };
+  return { candles };
 }
 
 // ============ USDOG 페그 엔진 (0.9998 ~ 1.0001 USD 사이 미세 변동) ============
@@ -674,7 +676,7 @@ export default function App() {
   const [difficulty, setDifficulty] = useState("normal");
   const [lang, setLang] = useState("ko");
   const t = useTranslation(lang);
-  const { candles, eventLabel } = useEngine(orderFlowRef, difficulty);
+  const { candles } = useEngine(orderFlowRef, difficulty);
   const pegHistory = usePegEngine();
   const pegRate = pegHistory[pegHistory.length - 1].c; // 1 USDOG = pegRate USD
   const price = candles[candles.length - 1].c;
@@ -690,8 +692,8 @@ export default function App() {
   const [positions, setPositions] = useState([]); // [{id, side, size, entry, leverage, margin, mode}]
   const [hedgeMode, setHedgeMode] = useState(false); // 양방향 포지션 허용 토글
   const [tradeMarkers, setTradeMarkers] = useState([]); // {idx, price, type: "buy"|"sell", side}
-  const [leverage, setLeverage] = useState(LEVERAGE_OPTIONS[0]);
-  const [marginMode, setMarginMode] = useState("cross"); // "cross" | "isolated"
+  const [leverage, setLeverage] = useState(null); // 미선택 — 사용자가 직접 골라야 거래 가능
+  const [marginMode, setMarginMode] = useState(null); // "cross" | "isolated" | null(미선택)
   const [marginInput, setMarginInput] = useState("");
   const [log, setLog] = useState([]);
   const [liquidated, setLiquidated] = useState(false); // deprecated: kept for disabled= checks below
@@ -777,10 +779,11 @@ export default function App() {
   const totalEquityUsdog = balance + totalPositionsValue + sogHolding * price;
   const totalEquityKrw = totalEquityUsdog * KRW_PER_USDOG;
 
-  const marginCap = LEVERAGE_MARGIN_CAP[leverage] ?? Infinity;
+  const marginCap = leverage ? (LEVERAGE_MARGIN_CAP[leverage] ?? Infinity) : Infinity;
   const hasLong = positions.some((p) => p.side === "long");
   const hasShort = positions.some((p) => p.side === "short");
   const canOpen = (side) => {
+    if (!leverage || !marginMode) return false; // 레버리지/모드 미선택 시 거래 불가
     if (!hedgeMode && positions.length > 0) return false; // 단방향: 이미 포지션 있으면 불가
     if (hedgeMode && ((side === "long" && hasLong) || (side === "short" && hasShort))) return false; // 같은 방향 중복 방지
     return true;
@@ -1008,12 +1011,6 @@ export default function App() {
         </div>
       </div>
 
-      {eventLabel && (
-        <div className="bg-gradient-to-r from-[#1a1206] via-[#241708] to-[#1a1206] text-[#e8b339] text-center text-[11px] py-1.5 font-semibold border-b border-[#2a2010] animate-pulse">
-          ⚡ {eventLabel}
-        </div>
-      )}
-
       {marketView === "futures" && (
         <>
       <div className="flex items-center justify-between px-3 py-1.5 border-b border-[#131722]">
@@ -1125,11 +1122,21 @@ export default function App() {
       {/* Order entry + book */}
       <div className="grid grid-cols-5 gap-0 border-b border-[#131722]">
         <div className="col-span-3 p-3 flex flex-col gap-2.5 border-r border-[#131722]">
+          {(!leverage || !marginMode) && (
+            <div className="text-[10px] text-[#e8b339] bg-[#1a1206] rounded px-2.5 py-1.5 border border-[#e8b339]/30">
+              ⚠ 레버리지와 마진 모드를 먼저 선택해야 거래할 수 있어요
+            </div>
+          )}
           <div className="flex gap-2">
-            <select value={leverage} onChange={(e) => setLeverage(Number(e.target.value))} className="flex-1 bg-[#131722] border border-[#1a1f2b] rounded px-2 py-1.5 text-xs font-mono">
+            <select
+              value={leverage ?? ""}
+              onChange={(e) => setLeverage(e.target.value ? Number(e.target.value) : null)}
+              className={`flex-1 bg-[#131722] border rounded px-2 py-1.5 text-xs font-mono ${leverage ? "border-[#1a1f2b]" : "border-[#e8b339] text-[#e8b339]"}`}
+            >
+              <option value="">레버리지 선택</option>
               {LEVERAGE_OPTIONS.map((l) => <option key={l} value={l}>{l}x</option>)}
             </select>
-            <div className="flex-1 flex rounded overflow-hidden border border-[#1a1f2b]">
+            <div className={`flex-1 flex rounded overflow-hidden border ${marginMode ? "border-[#1a1f2b]" : "border-[#e8b339]"}`}>
               <button
                 onClick={() => setMarginMode("cross")}
                 className={`flex-1 text-[11px] font-semibold ${marginMode === "cross" ? "bg-[#e8b339] text-black" : "bg-[#131722] text-[#5b6472]"}`}
@@ -1164,10 +1171,12 @@ export default function App() {
             ))}
           </div>
 
-          <div className="text-[10px] text-[#5b6472] flex justify-between font-mono">
-            <span>레버리지 {leverage}x 최대 증거금</span>
-            <span className={margin > marginCap ? "text-[#f6465d]" : "text-[#8b96a5]"}>{marginCap === Infinity ? "무제한" : `${marginCap} USDOG`}</span>
-          </div>
+          {leverage && (
+            <div className="text-[10px] text-[#5b6472] flex justify-between font-mono">
+              <span>레버리지 {leverage}x 최대 증거금</span>
+              <span className={margin > marginCap ? "text-[#f6465d]" : "text-[#8b96a5]"}>{marginCap === Infinity ? "무제한" : `${marginCap} USDOG`}</span>
+            </div>
+          )}
 
           <div className="grid grid-cols-2 gap-2 mt-1">
             <button
