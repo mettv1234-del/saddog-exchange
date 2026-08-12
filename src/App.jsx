@@ -68,8 +68,8 @@ function useEngine(orderFlowRef, difficulty) {
   const [eventLabel, setEventLabel] = useState(null);
   const sRef = useRef({
     price: START_PRICE, momentum: 0, tick: 0, pendingFlow: [],
-    eventTicks: 0, eventDir: 0, eventStrength: 0, // 빅이벤트: 원웨이 트렌드
-    megaEventTicks: 0, megaEventDir: 0, // 메가이벤트: 비트코인급 초강세 트렌드
+    eventTicks: 0, eventTotalTicks: 0, eventPhase: 0, eventDir: 0, eventStrength: 0, // 빅이벤트: 출렁이며 원웨이 트렌드
+    megaEventTicks: 0, megaEventTotalTicks: 0, megaEventDir: 0, megaEventStrength: 0, // 메가이벤트: 비트코인급 초강세 트렌드
   });
   const diffRef = useRef(difficulty);
   diffRef.current = difficulty;
@@ -79,9 +79,11 @@ function useEngine(orderFlowRef, difficulty) {
       const s = sRef.current;
       const preset = DIFFICULTY_PRESETS[diffRef.current] || DIFFICULTY_PRESETS.normal;
 
-      // 빅이벤트: 아주 가끔(무작위, 낮은 확률) 발동 — 발동하면 한 방향으로 강하게, 일정하게 쭉 밀림
+      // 빅이벤트: 아주 가끔(무작위, 낮은 확률) 발동 — 발동하면 한 방향으로, 저점/고점을 계단식으로 갱신하며 출렁출렁 진행
       if (s.eventTicks <= 0 && s.megaEventTicks <= 0 && Math.random() < 0.0025 * preset.volMult) {
         s.eventTicks = 40 + Math.floor(Math.random() * 80); // 길게 지속되는 트렌드
+        s.eventTotalTicks = s.eventTicks;
+        s.eventPhase = Math.random() * Math.PI * 2;
         s.eventDir = Math.random() < 0.5 ? 1 : -1;
         // 목표 배율 1~10배 사이 (0.01 기준이면 0.01~0.1 근처까지도 갈 수 있음)
         const targetMult = 1 + Math.random() * 9;
@@ -92,6 +94,7 @@ function useEngine(orderFlowRef, difficulty) {
       // 메가이벤트: 극히 낮은 확률로 비트코인 가격대(~12000)까지 폭등하는 초대형 이벤트
       if (s.eventTicks <= 0 && s.megaEventTicks <= 0 && Math.random() < 0.00004) {
         s.megaEventTicks = 300 + Math.floor(Math.random() * 400);
+        s.megaEventTotalTicks = s.megaEventTicks;
         s.megaEventDir = 1; // 메가이벤트는 항상 상승(전설의 불장)
         const targetPrice = 8000 + Math.random() * 6000; // 8000~14000 사이
         const targetMult = targetPrice / s.price;
@@ -124,22 +127,31 @@ function useEngine(orderFlowRef, difficulty) {
       let next;
 
       if (s.megaEventTicks > 0) {
-        // 메가이벤트: 원웨이로 일정하게 목표가까지 상승
-        next = Math.max(PRICE_FLOOR, s.price * (1 + s.megaEventStrength + (Math.random() - 0.5) * 0.002));
+        // 메가이벤트: 저점(고점)을 계단식으로 갱신하며 파도치듯 목표가로 접근 — 막판엔 강하게 터짐
+        const progress = 1 - s.megaEventTicks / s.megaEventTotalTicks; // 0→1
+        const wave = Math.sin(progress * Math.PI * 5) * 0.0035 * (1 - progress * 0.5); // 진행될수록 파동 감쇠
+        const finalBurst = progress > 0.85 ? (progress - 0.85) * 0.02 : 0; // 막판 급등 버스트
+        next = Math.max(PRICE_FLOOR, s.price * (1 + s.megaEventStrength + wave + finalBurst + (Math.random() - 0.5) * 0.0015));
         s.megaEventTicks -= 1;
         if (s.megaEventTicks === 0) setEventLabel(null);
       } else if (s.eventTicks > 0) {
-        // 빅이벤트: 원웨이로 일정하게 목표배율까지 이동 (약간의 잡음만)
-        next = Math.max(PRICE_FLOOR, s.price * (1 + s.eventDir * s.eventStrength + (Math.random() - 0.5) * 0.0015));
+        // 빅이벤트: 방향은 유지하되 저점(또는 고점)을 계단식으로 갱신하며 출렁이듯 진행
+        // (마치 "사줄 것처럼" 눌림목을 주다가 다시 치고 올라가는/내려가는 패턴)
+        const progress = 1 - s.eventTicks / s.eventTotalTicks;
+        const wave = Math.sin(progress * Math.PI * 4 + s.eventPhase) * 0.0045;
+        const pullbackDamp = 1 - Math.abs(Math.sin(progress * Math.PI * 4 + s.eventPhase)) * 0.4; // 눌림 구간엔 추세 약화
+        next = Math.max(PRICE_FLOOR, s.price * (1 + s.eventDir * s.eventStrength * pullbackDamp + wave + (Math.random() - 0.5) * 0.0018));
         s.eventTicks -= 1;
         if (s.eventTicks === 0) setEventLabel(null);
       } else {
-        s.momentum = s.momentum * 0.7 + drift * 0.3;
-        next = Math.max(PRICE_FLOOR, s.price * (1 + s.momentum + drift));
+        // 평상시(횡보): 변동성을 더 살려서 지루하지 않게
+        s.momentum = s.momentum * 0.65 + drift * 0.35;
+        next = Math.max(PRICE_FLOOR, s.price * (1 + s.momentum + drift * 1.6));
       }
 
-      const high = Math.max(open, next) * (1 + Math.random() * 0.002 * preset.volMult);
-      const low = Math.max(PRICE_FLOOR, Math.min(open, next) * (1 - Math.random() * 0.002 * preset.volMult));
+      const wickMult = (s.eventTicks > 0 || s.megaEventTicks > 0) ? 1 : 1.8; // 횡보 구간 꼬리도 더 길게
+      const high = Math.max(open, next) * (1 + Math.random() * 0.002 * preset.volMult * wickMult);
+      const low = Math.max(PRICE_FLOOR, Math.min(open, next) * (1 - Math.random() * 0.002 * preset.volMult * wickMult));
       const vol = 300 + Math.abs(drift) * 200000 + Math.random() * 700;
       s.price = next;
       s.tick += 1;
@@ -684,12 +696,15 @@ export default function App() {
         const hit = pos.side === "long" ? price <= liq : price >= liq;
         if (hit) toLiquidate.push(pos);
       } else {
-        // 교차: 계좌 전체 자산(잔고 + 모든 교차포지션 평가손익 합)이 유지증거금 이하로 떨어지면 청산
+        // 교차: 계좌 전체 자산(잔고 + 모든 교차포지션의 증거금+평가손익 합)이 유지증거금 이하로 떨어지면 청산
         const mmr = maintenanceMarginRate(pos.leverage);
         const notional = pos.size * price;
         const maintenanceMargin = notional * mmr;
-        const crossEquity = balance + positions.filter(p => p.mode === "cross").reduce((sum, p) => sum + positionPnl(p, price), 0);
-        if (crossEquity <= maintenanceMargin) toLiquidate.push(pos);
+        const crossPositions = positions.filter((p) => p.mode === "cross");
+        const crossEquity = balance + crossPositions.reduce((sum, p) => sum + p.margin + positionPnl(p, price), 0);
+        // 모든 교차 포지션의 유지증거금 합계와 비교 (계좌 전체가 공동담보이므로)
+        const totalMaintenanceMargin = crossPositions.reduce((sum, p) => sum + p.size * price * maintenanceMarginRate(p.leverage), 0);
+        if (crossEquity <= totalMaintenanceMargin) toLiquidate.push(pos);
       }
     }
     if (toLiquidate.length > 0) {
@@ -934,7 +949,7 @@ export default function App() {
             title={t.refillButton}
             className="flex items-center gap-1 bg-[#131722] hover:bg-[#1a1f2b] border border-[#1a1f2b] text-[#e8b339] text-[10px] font-semibold px-2 py-1.5 rounded-lg whitespace-nowrap active:scale-95 transition-transform"
           >
-            <Play size={11} /> +1000
+            <Play size={11} /> +{START_BALANCE_USDOG}
           </button>
         </div>
       </div>
@@ -1264,3 +1279,5 @@ export default function App() {
     </div>
   );
 }
+ 
+ 
