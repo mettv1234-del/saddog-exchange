@@ -24,6 +24,8 @@ const USDOG_POOL = 1_000_000_000_000;
 const START_PRICE = USDOG_POOL / SOG_TOTAL_SUPPLY; // 0.01
 
 // 레버리지별 최대 증거금 한도 (USDOG). 1배는 무제한(Infinity)
+const LEVERAGE_OPTIONS = [1, 2, 3, 5, 10, 20, 50, 75, 100];
+
 const LEVERAGE_MARGIN_CAP = {
   100: 10,
   75: 15,
@@ -688,7 +690,7 @@ export default function App() {
   const [positions, setPositions] = useState([]); // [{id, side, size, entry, leverage, margin, mode}]
   const [hedgeMode, setHedgeMode] = useState(false); // 양방향 포지션 허용 토글
   const [tradeMarkers, setTradeMarkers] = useState([]); // {idx, price, type: "buy"|"sell", side}
-  const [leverage, setLeverage] = useState(12.5);
+  const [leverage, setLeverage] = useState(LEVERAGE_OPTIONS[0]);
   const [marginMode, setMarginMode] = useState("cross"); // "cross" | "isolated"
   const [marginInput, setMarginInput] = useState("");
   const [log, setLog] = useState([]);
@@ -1125,7 +1127,7 @@ export default function App() {
         <div className="col-span-3 p-3 flex flex-col gap-2.5 border-r border-[#131722]">
           <div className="flex gap-2">
             <select value={leverage} onChange={(e) => setLeverage(Number(e.target.value))} className="flex-1 bg-[#131722] border border-[#1a1f2b] rounded px-2 py-1.5 text-xs font-mono">
-              {[1, 2, 3, 5, 10, 20, 50, 75, 100].map((l) => <option key={l} value={l}>{l}x</option>)}
+              {LEVERAGE_OPTIONS.map((l) => <option key={l} value={l}>{l}x</option>)}
             </select>
             <div className="flex-1 flex rounded overflow-hidden border border-[#1a1f2b]">
               <button
