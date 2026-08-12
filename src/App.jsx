@@ -20,8 +20,8 @@ const KRW_PER_USDOG = 1430;
 const PRICE_FLOOR = 1e-14; // 극소 가격 하한 (초기 시총이 작아 START_PRICE 자체가 매우 작을 수 있음)
 
 const SOG_TOTAL_SUPPLY_INITIAL = 100_000_000_000_000; // 초기 발행량 100조
-const USDOG_POOL_INITIAL = 10_000_000 / KRW_PER_USDOG; // 예치금 1000만원 규모 → USDOG 환산
-const START_PRICE = USDOG_POOL_INITIAL / SOG_TOTAL_SUPPLY_INITIAL;
+const START_PRICE = 0.0001; // 원하는 시작가를 직접 고정
+const USDOG_POOL_INITIAL = START_PRICE * SOG_TOTAL_SUPPLY_INITIAL; // 시작가로부터 예치금 역산 (= 100억 USDOG)
 
 const BURN_INTERVAL_MS = 30_000; // 30초마다 소각
 const BURN_STAGE1_TARGET = 99_000_000_000_000; // 1단계: 100조 → 99조 (정확히 1조씩 소각)
@@ -1387,8 +1387,10 @@ export default function App() {
           <div className="bg-[#0d1117] border border-[#1a1f2b] rounded-xl p-5 max-w-sm w-full" onClick={(e) => e.stopPropagation()}>
             <div className="font-bold text-base mb-3">{t.marketInfoTitle}</div>
             <div className="space-y-3 text-[12px] font-mono">
-              <div className="flex justify-between"><span className="text-[#5b6472]">{t.totalSupply}</span><span>{Math.round(sogSupply).toLocaleString()} SOG</span></div>
-              <div className="text-[9.5px] text-[#3a4658] -mt-2">초기 발행량 100,000,000,000,000 SOG · 30초마다 소각 진행 중</div>
+              <div className="flex justify-between"><span className="text-[#5b6472]">초기 발행량</span><span>{SOG_TOTAL_SUPPLY_INITIAL.toLocaleString()} SOG</span></div>
+              <div className="flex justify-between"><span className="text-[#5b6472]">{t.totalSupply} (현재)</span><span className="text-[#e8b339]">{Math.round(sogSupply).toLocaleString()} SOG</span></div>
+              <div className="flex justify-between"><span className="text-[#5b6472]">누적 소각량</span><span className="text-[#f6465d]">{Math.round(SOG_TOTAL_SUPPLY_INITIAL - sogSupply).toLocaleString()} SOG</span></div>
+              <div className="text-[9.5px] text-[#3a4658] -mt-2">30초마다 소각 진행 중 · 소각될 때마다 가격이 즉시 갭상승합니다</div>
 
               <div>
                 <div className="flex justify-between"><span className="text-[#5b6472]">{t.reservePool}</span><span>{usdogPoolDisplay.toFixed(2)} USDOG</span></div>
