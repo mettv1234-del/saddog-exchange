@@ -5,23 +5,32 @@ import { useTranslation } from "./i18n.js";
 
 const TICK_MS = 500;
 
-// 가격 크기에 따라 적절한 소수 자릿수로 표시 (작은 값은 사토시까지, 큰 값은 짧게)
+// 가격 크기에 따라 적절한 소수 자릿수로 표시 (작은 값은 사토시까지, 매우 작은 값은 지수표기, 큰 값은 짧게)
 function formatPrice(v) {
   if (v == null || !isFinite(v)) return "-";
   if (v >= 1000) return v.toFixed(2);
   if (v >= 1) return v.toFixed(4);
-  if (v >= 0.01) return v.toFixed(6);
-  return v.toFixed(9);
+  if (v >= 0.000001) return v.toFixed(9);
+  return v.toExponential(4); // 예: 6.9930e-11
 }
 const MAX_HISTORY = 5000; // 넉넉한 히스토리 보관 (약 40분 분량, TICK_MS=500ms 기준) — MA200/일목 등 지표가 끊기지 않도록
 const VISIBLE_CANDLES_DEFAULT = 70;
 const START_BALANCE_USDOG = 100;
 const KRW_PER_USDOG = 1430;
-const PRICE_FLOOR = 0.000000001; // 사토시 단위 하한 (10^-9)
+const PRICE_FLOOR = 1e-14; // 극소 가격 하한 (초기 시총이 작아 START_PRICE 자체가 매우 작을 수 있음)
 
-const SOG_TOTAL_SUPPLY = 100_000_000_000_000;
-const USDOG_POOL = 1_000_000_000_000;
-const START_PRICE = USDOG_POOL / SOG_TOTAL_SUPPLY; // 0.01
+const SOG_TOTAL_SUPPLY_INITIAL = 100_000_000_000_000; // 초기 발행량 100조
+const USDOG_POOL_INITIAL = 10_000_000 / KRW_PER_USDOG; // 예치금 1000만원 규모 → USDOG 환산
+const START_PRICE = USDOG_POOL_INITIAL / SOG_TOTAL_SUPPLY_INITIAL;
+
+const BURN_INTERVAL_MS = 30_000; // 30초마다 소각
+const BURN_STAGE1_TARGET = 99_000_000_000_000; // 1단계: 100조 → 99조 (정확히 1조씩 소각)
+const BURN_STAGE1_AMOUNT = 1_000_000_000_000; // 1조개씩
+const BURN_STAGE2_FINAL = 21_000_000; // 2단계: 99조 → 2100만까지 무작위 분량 소각
+
+const BUY_INFLOW_INTERVAL_MS = 30_000; // 30초마다 매수 유입
+const BUY_INFLOW_KRW = 1_000_000; // 100만원 규모
+const BUY_INFLOW_USDOG = BUY_INFLOW_KRW / KRW_PER_USDOG;
 
 // 레버리지별 최대 증거금 한도 (USDOG). 1배는 무제한(Infinity)
 const LEVERAGE_OPTIONS = [1, 2, 3, 5, 10, 20, 50, 75, 100];
@@ -54,20 +63,49 @@ function maintenanceMarginRate(leverage) {
 }
 
 // ============ Engine ============
-// 난이도별: 변동성 배율, 유저 매매 영향력, 페이크아웃(역방향 유도) 확률
+// 난이도별: 변동성 배율, 페이크아웃(역방향 유도) 확률. AMM 구조에서는 유저 영향력이 즉시/직접 반영되므로 별도 계수 불필요.
 const DIFFICULTY_PRESETS = {
-  easy:    { volMult: 0.6, userInfluence: 0.020, fakeoutChance: 0.00, label: "쉬움" },
-  normal:  { volMult: 1.0, userInfluence: 0.008, fakeoutChance: 0.05, label: "보통" },
-  hard:    { volMult: 1.6, userInfluence: 0.003, fakeoutChance: 0.15, label: "어려움" },
-  extreme: { volMult: 4.5, userInfluence: 0.0002, fakeoutChance: 0.45, label: "극한" },
+  easy:    { volMult: 0.6, label: "쉬움" },
+  normal:  { volMult: 1.0, label: "보통" },
+  hard:    { volMult: 1.8, label: "어려움" },
+  extreme: { volMult: 3.2, label: "극한" },
 };
 
 function rndInt(n) { return Math.floor(Math.random() * n); }
 function rndRange(a, b) { return a + Math.random() * (b - a); }
 function pick(arr) { return arr[rndInt(arr.length)]; }
 
-// 국면(phase) 재료 라이브러리 — 이 조각들을 무작위로 조합해서 실질적으로 수백~수천 가지의
-// 서로 다른 파동 시퀀스를 만든다. 사람이 100개를 일일이 정의하는 대신 "조합 폭발"로 예측 불가능성을 확보.
+// 1틱 급변 이벤트 재료 — "1틱만에 장대양봉/장대음봉이 훅 튀고, 그 다음 확률적으로 반등/횡보/추가급락/추가급등"
+// 사인파처럼 부드럽지 않고 순간적으로 크게 움직이는 형태
+function rollShockEvent(volMult) {
+  const r = Math.random();
+  if (r < 0.35) {
+    // 장대양봉 한방
+    return { type: "candleUp", poolMult: rndRange(1.03, 1.35) * volMult * 0.5 + 1 };
+  } else if (r < 0.70) {
+    // 장대음봉 한방
+    return { type: "candleDown", poolMult: 1 - (rndRange(0.03, 0.30) * volMult * 0.5) };
+  } else if (r < 0.85) {
+    // 급락 후 즉시 반등
+    return { type: "flashCrashBounce", poolMult: 1 - rndRange(0.05, 0.25) };
+  } else {
+    // 급등 후 즉시 눌림
+    return { type: "flashPumpDump", poolMult: 1 + rndRange(0.05, 0.25) };
+  }
+}
+
+// 상한 없는 로그정규분포 목표가 샘플러 (메가이벤트용)
+function sampleMegaTargetPrice() {
+  const u1 = Math.max(1e-12, Math.random());
+  const u2 = Math.random();
+  const z = Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
+  const mu = Math.log(9000);
+  const sigma = 2.6;
+  const price = Math.exp(mu + sigma * z);
+  return Math.max(1000, price);
+}
+
+// 국면(phase) 재료 라이브러리 — 큰 흐름(패턴)을 만드는 조합형 시퀀스
 function makePhase(kind) {
   switch (kind) {
     case "surge":       return { ticks: 8 + rndInt(22), mult: rndRange(1.15, 2.8), vol: rndRange(0.8, 1.4) };
@@ -84,16 +122,12 @@ function makePhase(kind) {
     default:              return { ticks: 10, mult: 1, vol: 1 };
   }
 }
-
 const UP_PHASE_KINDS = ["surge", "microSurge", "burst", "slowDrift"];
 const DOWN_PHASE_KINDS = ["dip", "microDip", "crash", "slowFade"];
 const NEUTRAL_PHASE_KINDS = ["chop", "quietRange", "wickyChop"];
-
-// 완전히 무작위 조합으로 국면 시퀀스를 생성 (개수/순서/방향이 매번 달라짐 → 사실상 무한에 가까운 패턴 수)
 function generatePhaseSequence() {
-  const phaseCount = 4 + rndInt(9); // 4~12개 국면을 무작위로 이어붙임
+  const phaseCount = 4 + rndInt(9);
   const seq = [];
-  let lastWasDirectional = false;
   for (let i = 0; i < phaseCount; i++) {
     const roll = Math.random();
     let kind;
@@ -101,25 +135,22 @@ function generatePhaseSequence() {
     else if (roll < 0.68) kind = pick(DOWN_PHASE_KINDS);
     else kind = pick(NEUTRAL_PHASE_KINDS);
     seq.push(makePhase(kind));
-    lastWasDirectional = kind !== "chop" && kind !== "quietRange" && kind !== "wickyChop";
   }
-  // 절반 확률로 마지막에 강한 마무리(버스트/크래시) 추가
-  if (Math.random() < 0.5) {
-    seq.push(makePhase(Math.random() < 0.5 ? "burst" : "crash"));
-  }
+  if (Math.random() < 0.5) seq.push(makePhase(Math.random() < 0.5 ? "burst" : "crash"));
   return seq;
 }
 
-function useEngine(orderFlowRef, difficulty) {
-  const [candles, setCandles] = useState(() =>
-    Array.from({ length: MAX_HISTORY }, (_, i) => ({
-      o: START_PRICE, h: START_PRICE * 1.001, l: START_PRICE * 0.999, c: START_PRICE,
-      v: 1000 + Math.random() * 500, t: i,
-    }))
-  );
+function useEngine(orderFlowRef, difficulty, ammStateRef) {
+  const [candles, setCandles] = useState(() => {
+    const p = ammStateRef.current.usdogPool / ammStateRef.current.sogSupply;
+    return Array.from({ length: MAX_HISTORY }, (_, i) => ({
+      o: p, h: p * 1.001, l: p * 0.999, c: p, v: 1000 + Math.random() * 500, t: i,
+    }));
+  });
   const sRef = useRef({
-    price: START_PRICE, momentum: 0, tick: 0, pendingFlow: [],
-    seq: null, seqIdx: 0, // 국면 시퀀스 상태머신 (배너 없이 내부적으로만 동작)
+    tick: 0,
+    followupTicks: 0, followupType: null, followupStrength: 0, // 쇼크 이벤트 후속 전개
+    seq: null, seqIdx: 0,
     megaEventTicks: 0, megaEventTotalTicks: 0, megaEventStrength: 0,
   });
   const diffRef = useRef(difficulty);
@@ -128,95 +159,133 @@ function useEngine(orderFlowRef, difficulty) {
   useEffect(() => {
     const id = setInterval(() => {
       const s = sRef.current;
+      const amm = ammStateRef.current;
       const preset = DIFFICULTY_PRESETS[diffRef.current] || DIFFICULTY_PRESETS.normal;
+      const open = amm.usdogPool / amm.sogSupply;
 
-      // 새 파동 시퀀스 시작 (조합형 — 매번 다른 개수/방향/강도의 국면들)
+      // 유저 매수/매도: 즉시 예치금(usdogPool)에 반영 — AMM 공식이 그대로 가격에 반영
+      const flow = orderFlowRef.current;
+      if (flow.pendingUsdog !== 0) {
+        amm.usdogPool = Math.max(1e-9, amm.usdogPool + flow.pendingUsdog);
+        flow.pendingUsdog = 0;
+      }
+
+      // 1틱 급변 쇼크 이벤트 (사인파 없이 순간적으로 툭 튐)
+      if (!s.followupTicks && !s.seq && s.megaEventTicks <= 0 && Math.random() < 0.03 * preset.volMult) {
+        const shock = rollShockEvent(preset.volMult);
+        amm.usdogPool = Math.max(1e-9, amm.usdogPool * shock.poolMult);
+        // 쇼크 후 후속 전개: 반등/횡보/추가급락/추가급등 중 확률적으로 하나
+        const follow = Math.random();
+        if (follow < 0.30) { s.followupType = "rebound"; s.followupTicks = 4 + rndInt(10); }
+        else if (follow < 0.60) { s.followupType = "range"; s.followupTicks = 6 + rndInt(16); }
+        else if (follow < 0.82) { s.followupType = "continue"; s.followupTicks = 5 + rndInt(14); }
+        else { s.followupType = "reverse"; s.followupTicks = 5 + rndInt(12); }
+        s.followupSign = shock.poolMult >= 1 ? 1 : -1;
+      } else if (s.followupTicks > 0) {
+        const strength = 0.006 * preset.volMult;
+        let mult = 1;
+        if (s.followupType === "rebound") mult = 1 - s.followupSign * strength * rndRange(0.5, 1.3);
+        else if (s.followupType === "continue") mult = 1 + s.followupSign * strength * rndRange(0.4, 1.1);
+        else if (s.followupType === "reverse") mult = 1 - s.followupSign * strength * rndRange(0.6, 1.4);
+        else mult = 1 + (Math.random() - 0.5) * strength * 0.6; // range
+        amm.usdogPool = Math.max(1e-9, amm.usdogPool * mult);
+        s.followupTicks -= 1;
+      }
+
+      // 국면 시퀀스(패턴형 파동) — 여전히 남겨서 큰 흐름을 만들되, 최종 힘을 usdogPool에 반영
       if (!s.seq && s.megaEventTicks <= 0 && Math.random() < 0.006 * preset.volMult) {
         s.seq = generatePhaseSequence();
         s.seqIdx = 0;
       }
-
-      // 메가이벤트: 극히 낮은 확률로 비트코인 가격대까지 폭등하는 초대형 이벤트 (배너 없음)
-      if (!s.seq && s.megaEventTicks <= 0 && Math.random() < 0.00004) {
-        s.megaEventTicks = 300 + rndInt(400);
-        s.megaEventTotalTicks = s.megaEventTicks;
-        const targetPrice = 8000 + Math.random() * 6000;
-        const targetMult = targetPrice / s.price;
-        s.megaEventStrength = Math.pow(Math.max(1.01, targetMult), 1 / s.megaEventTicks) - 1;
-      }
-
-      // 다층 노이즈: 여러 개의 서로 다른 주기/진폭 랜덤워크를 겹쳐서 예측 불가능성을 강화
-      const n1 = (Math.random() - 0.5) * 0.005 * preset.volMult;
-      const n2 = (Math.random() - 0.5) * 0.0025 * preset.volMult;
-      const n3 = (Math.random() - 0.5) * 0.0012 * preset.volMult;
-      let drift = n1 + n2 * (Math.random() < 0.5 ? 1 : -1) + n3;
-
-      // 유저 주문은 즉시 반영하지 않고 큐에 넣어 지연 후 노이즈와 함께 반영
-      const flow = orderFlowRef.current;
-      if (flow.pending !== 0) {
-        const delay = 3 + rndInt(8);
-        s.pendingFlow.push({ ticksLeft: delay, amount: flow.pending * preset.userInfluence });
-        flow.pending = 0;
-      }
-      let queuedForce = 0;
-      s.pendingFlow = s.pendingFlow.filter((f) => {
-        f.ticksLeft -= 1;
-        if (f.ticksLeft <= 0) {
-          const flipped = Math.random() < preset.fakeoutChance ? -1 : 1;
-          queuedForce += f.amount * flipped * (0.5 + Math.random());
-          return false;
+      if (s.seq) {
+        const ph = s.seq[s.seqIdx];
+        if (!ph.ticksLeft) ph.ticksLeft = ph.ticks;
+        if (!ph.perTickRate) ph.perTickRate = Math.pow(ph.mult, 1 / ph.ticks) - 1;
+        const tickDir = ph.choppy ? (Math.random() < 0.5 ? 1 : -1) : 1;
+        const noiseScale = 0.0009 * ph.vol;
+        const mult = 1 + tickDir * ph.perTickRate + (Math.random() - 0.5) * noiseScale * 2;
+        amm.usdogPool = Math.max(1e-9, amm.usdogPool * mult);
+        ph.ticksLeft -= 1;
+        if (ph.ticksLeft <= 0) {
+          s.seqIdx += 1;
+          if (s.seqIdx >= s.seq.length) { s.seq = null; s.seqIdx = 0; }
         }
-        return true;
-      });
-      drift += queuedForce;
+      }
 
-      const open = s.price;
-      let next;
-      let wickMult = 1.8;
-
+      // 메가이벤트: 상한 없는 로그정규분포 목표가 (배너 없음)
+      if (!s.seq && s.megaEventTicks <= 0 && Math.random() < 0.00004) {
+        const curPrice = amm.usdogPool / amm.sogSupply;
+        const targetPrice = sampleMegaTargetPrice();
+        const targetMult = Math.max(1.01, targetPrice / curPrice);
+        const baseTicks = 300 + rndInt(400);
+        const scaledTicks = Math.min(6000, Math.round(baseTicks * Math.max(1, Math.log10(targetMult))));
+        s.megaEventTicks = scaledTicks;
+        s.megaEventTotalTicks = scaledTicks;
+        s.megaEventStrength = Math.pow(targetMult, 1 / scaledTicks) - 1;
+      }
       if (s.megaEventTicks > 0) {
         const progress = 1 - s.megaEventTicks / s.megaEventTotalTicks;
         const wave = Math.sin(progress * Math.PI * (4 + rndInt(4))) * 0.004 * (1 - progress * 0.4);
         const finalBurst = progress > 0.85 ? (progress - 0.85) * 0.022 : 0;
-        next = Math.max(PRICE_FLOOR, s.price * (1 + s.megaEventStrength + wave + finalBurst + drift));
+        amm.usdogPool = Math.max(1e-9, amm.usdogPool * (1 + s.megaEventStrength + wave + finalBurst));
         s.megaEventTicks -= 1;
-        wickMult = 2.4;
-        if (s.megaEventTicks === 0) s.megaEventTicks = 0;
-      } else if (s.seq) {
-        const ph = s.seq[s.seqIdx];
-        if (!ph.ticksLeft) ph.ticksLeft = ph.ticks;
-        if (!ph.perTickRate) ph.perTickRate = Math.pow(ph.mult, 1 / ph.ticks) - 1;
-        // choppy 국면은 매틱 방향을 랜덤하게 뒤집어서 "이리갔다 저리갔다" 하는 느낌을 만듦
-        const tickDir = ph.choppy ? (Math.random() < 0.5 ? 1 : -1) : 1;
-        const noiseScale = 0.0009 * ph.vol;
-        next = Math.max(PRICE_FLOOR, s.price * (1 + tickDir * ph.perTickRate + drift + (Math.random() - 0.5) * noiseScale * 2));
-        wickMult = 0.6 + ph.vol * 0.9;
-        ph.ticksLeft -= 1;
-        if (ph.ticksLeft <= 0) {
-          s.seqIdx += 1;
-          if (s.seqIdx >= s.seq.length) {
-            s.seq = null;
-            s.seqIdx = 0;
-          }
-        }
-      } else {
-        // 평상시(횡보): 방향이 수시로 뒤집히는 예측불가 노이즈
-        s.momentum = s.momentum * 0.5 + drift * 0.5 * (Math.random() < 0.15 ? -1.3 : 1);
-        next = Math.max(PRICE_FLOOR, s.price * (1 + s.momentum + drift * 1.8));
-        wickMult = 2.0;
       }
 
+      // 배경 노이즈(항상 약하게 겹침)
+      const bgNoise = 1 + (Math.random() - 0.5) * 0.0015 * preset.volMult;
+      amm.usdogPool = Math.max(1e-9, amm.usdogPool * bgNoise);
+
+      const next = amm.usdogPool / amm.sogSupply;
+      const wickMult = s.followupTicks > 0 || s.megaEventTicks > 0 ? 2.4 : 1.8;
       const high = Math.max(open, next) * (1 + Math.random() * 0.0022 * preset.volMult * wickMult);
       const low = Math.max(PRICE_FLOOR, Math.min(open, next) * (1 - Math.random() * 0.0022 * preset.volMult * wickMult));
-      const vol = 300 + Math.abs(drift) * 200000 + Math.random() * 700;
-      s.price = next;
+      const vol = 300 + Math.abs(next - open) / open * 200000 + Math.random() * 700;
       s.tick += 1;
       setCandles((prev) => [...prev.slice(1), { o: open, h: high, l: low, c: next, v: vol, t: s.tick }]);
     }, TICK_MS);
     return () => clearInterval(id);
-  }, [orderFlowRef]);
+  }, [orderFlowRef, ammStateRef]);
 
   return { candles };
+}
+
+// ============ 소각(Burn) 엔진 — 30초마다 SOG 발행량 감소, 소각 즉시 가격 갭상승 ============
+function useBurnEngine(ammStateRef, onBurn) {
+  const [supply, setSupply] = useState(() => ammStateRef.current.sogSupply);
+  useEffect(() => {
+    const id = setInterval(() => {
+      const amm = ammStateRef.current;
+      if (amm.sogSupply <= BURN_STAGE2_FINAL) return; // 최종 하한 도달 시 소각 종료
+      let burnAmount;
+      if (amm.sogSupply > BURN_STAGE1_TARGET) {
+        // 1단계: 100조 → 99조, 정확히 1조씩
+        burnAmount = Math.min(BURN_STAGE1_AMOUNT, amm.sogSupply - BURN_STAGE1_TARGET);
+      } else {
+        // 2단계: 99조 → 2100만, 무작위 분량 (남은 양의 0.5%~3% 사이를 매 소각마다)
+        const remaining = amm.sogSupply - BURN_STAGE2_FINAL;
+        const burnPct = rndRange(0.005, 0.03);
+        burnAmount = Math.min(remaining, Math.max(1, remaining * burnPct));
+      }
+      amm.sogSupply = Math.max(BURN_STAGE2_FINAL, amm.sogSupply - burnAmount);
+      // 소각되는 순간 유통량이 줄어드니 AMM 공식(usdogPool/sogSupply)에 의해 가격이 자동으로 갭상승
+      setSupply(amm.sogSupply);
+      onBurn && onBurn(burnAmount, amm.sogSupply);
+    }, BURN_INTERVAL_MS);
+    return () => clearInterval(id);
+  }, [ammStateRef, onBurn]);
+  return supply;
+}
+
+// ============ 매수 유입 엔진 — 30초마다 100만원 규모 매수가 예치금에 유입 ============
+function useBuyInflowEngine(ammStateRef, onInflow) {
+  useEffect(() => {
+    const id = setInterval(() => {
+      const amm = ammStateRef.current;
+      amm.usdogPool += BUY_INFLOW_USDOG;
+      onInflow && onInflow(BUY_INFLOW_USDOG);
+    }, BUY_INFLOW_INTERVAL_MS);
+    return () => clearInterval(id);
+  }, [ammStateRef, onInflow]);
 }
 
 // ============ USDOG 페그 엔진 (0.9998 ~ 1.0001 USD 사이 미세 변동) ============
@@ -672,11 +741,15 @@ function OrderBook({ price }) {
 
 // ============ App ============
 export default function App() {
-  const orderFlowRef = useRef({ pending: 0 });
+  const orderFlowRef = useRef({ pendingUsdog: 0 });
+  const ammStateRef = useRef({ usdogPool: USDOG_POOL_INITIAL, sogSupply: SOG_TOTAL_SUPPLY_INITIAL });
   const [difficulty, setDifficulty] = useState("normal");
   const [lang, setLang] = useState("ko");
   const t = useTranslation(lang);
-  const { candles } = useEngine(orderFlowRef, difficulty);
+  const { candles } = useEngine(orderFlowRef, difficulty, ammStateRef);
+  const sogSupply = useBurnEngine(ammStateRef);
+  useBuyInflowEngine(ammStateRef);
+  const usdogPoolDisplay = ammStateRef.current.usdogPool; // candles 갱신과 함께 최신값 참조 (근사 실시간)
   const pegHistory = usePegEngine();
   const pegRate = pegHistory[pegHistory.length - 1].c; // 1 USDOG = pegRate USD
   const price = candles[candles.length - 1].c;
@@ -793,9 +866,11 @@ export default function App() {
     if (!canOpen(side) || margin <= 0 || margin > balance) return;
     if (margin > marginCap) return;
     const size = (margin * leverage) / price;
+    const notional = margin * leverage; // 레버리지 적용된 실제 매수/매도 규모
     setBalance((b) => b - margin);
     setPositions((prev) => [...prev, { id: Date.now() + Math.random(), side, size, entry: price, leverage, margin, mode: marginMode }]);
-    orderFlowRef.current.pending += side === "long" ? 1 : -1;
+    // 즉시 반영: 롱=예치금 증가(가격↑), 숏=예치금 감소(가격↓)
+    orderFlowRef.current.pendingUsdog += side === "long" ? notional : -notional;
     pushLog(`${side === "long" ? "Long" : "Short"} 진입 · ${leverage}x · ${marginMode === "isolated" ? "격리" : "교차"} · ${margin} USDOG`, side === "long" ? "good" : "bad");
     setTradeMarkers((m) => [...m, { idx: candles[candles.length - 1].t, price, type: "entry", side }]);
     setMarginInput("");
@@ -820,8 +895,10 @@ export default function App() {
     const pos = positions.find((p) => p.id === posId);
     if (!pos) return;
     const pnlNow = positionPnl(pos, price);
+    const notional = pos.margin * pos.leverage;
     setBalance((b) => b + pos.margin + pnlNow);
-    orderFlowRef.current.pending += pos.side === "long" ? -0.7 : 0.7;
+    // 종료 시 반대 방향으로 되돌려 반영 (포지션 청산 = 반대매매)
+    orderFlowRef.current.pendingUsdog += pos.side === "long" ? -notional : notional;
     pushLog(`포지션 종료 · ${pnlNow >= 0 ? "+" : ""}${pnlNow.toFixed(2)} USDOG`, pnlNow >= 0 ? "good" : "bad");
     setTradeMarkers((m) => [...m, { idx: candles[candles.length - 1].t, price, type: "exit", side: pos.side }]);
     setPositions((prev) => prev.filter((p) => p.id !== posId));
@@ -863,12 +940,16 @@ export default function App() {
       const sogReceived = convertAmount / price;
       setBalance((b) => Math.max(0, b - convertAmount));
       setSogHolding((s) => s + sogReceived);
+      // 실제 AMM 스왑: USDOG를 넣고 SOG를 받아가므로 예치금이 늘어 가격이 즉시 상승
+      orderFlowRef.current.pendingUsdog += convertAmount;
       pushLog(`🔄 환전 · ${convertAmount.toFixed(2)} USDOG → ${sogReceived.toFixed(2)} SOG`, "neutral");
     } else {
       if (convertAmount > sogHolding) return;
       const usdogReceived = convertAmount * price;
       setSogHolding((s) => Math.max(0, s - convertAmount));
       setBalance((b) => b + usdogReceived);
+      // 실제 AMM 스왑: SOG를 넣고 USDOG를 받아가므로 예치금이 줄어 가격이 즉시 하락
+      orderFlowRef.current.pendingUsdog -= usdogReceived;
       pushLog(`🔄 환전 · ${convertAmount.toFixed(2)} SOG → ${usdogReceived.toFixed(2)} USDOG`, "neutral");
     }
     setConvertInput("");
@@ -1231,10 +1312,21 @@ export default function App() {
               <span className="text-[#5b6472]">{t.pnlPct}</span>
               <span className={`font-mono font-bold ${pnlPctNow >= 0 ? "text-[#f6465d]" : "text-[#3b82f6]"}`}>{pnlPctNow >= 0 ? "+" : ""}{pnlPctNow.toFixed(1)}%</span>
             </div>
+            <div className="px-4 pb-2 flex justify-between text-[11px] font-mono">
+              <span className="text-[#5b6472]">담보금(마진)</span>
+              <span>{pos.margin.toFixed(2)} USDOG</span>
+            </div>
+            <div className="px-4 pb-2 flex justify-between text-[11px] font-mono">
+              <span className="text-[#5b6472]">포지션 규모</span>
+              <span>{(pos.margin * pos.leverage).toFixed(2)} USDOG <span className="text-[#3a4658]">({pos.leverage}x)</span></span>
+            </div>
             <div className="px-4 pb-3 flex justify-between text-[11px] font-mono">
-              <span className="text-[#5b6472]">{pos.mode === "isolated" ? t.marginLiq : "증거금 / 청산조건"}</span>
+              <span className="text-[#5b6472]">보유 SOG 수량</span>
+              <span>{pos.size.toFixed(4)} SOG</span>
+            </div>
+            <div className="px-4 pb-3 flex justify-between text-[11px] font-mono">
+              <span className="text-[#5b6472]">{pos.mode === "isolated" ? t.liqPrice : "청산조건"}</span>
               <span>
-                {pos.margin.toFixed(2)} USDOG ·{" "}
                 {pos.mode === "isolated" ? (
                   <span className="text-[#f6465d]">{formatPrice(liqP)}</span>
                 ) : (
@@ -1295,13 +1387,14 @@ export default function App() {
           <div className="bg-[#0d1117] border border-[#1a1f2b] rounded-xl p-5 max-w-sm w-full" onClick={(e) => e.stopPropagation()}>
             <div className="font-bold text-base mb-3">{t.marketInfoTitle}</div>
             <div className="space-y-3 text-[12px] font-mono">
-              <div className="flex justify-between"><span className="text-[#5b6472]">{t.totalSupply}</span><span>100,000,000,000,000 SOG</span></div>
+              <div className="flex justify-between"><span className="text-[#5b6472]">{t.totalSupply}</span><span>{Math.round(sogSupply).toLocaleString()} SOG</span></div>
+              <div className="text-[9.5px] text-[#3a4658] -mt-2">초기 발행량 100,000,000,000,000 SOG · 30초마다 소각 진행 중</div>
 
               <div>
-                <div className="flex justify-between"><span className="text-[#5b6472]">{t.reservePool}</span><span>{USDOG_POOL.toLocaleString()} USDOG</span></div>
+                <div className="flex justify-between"><span className="text-[#5b6472]">{t.reservePool}</span><span>{usdogPoolDisplay.toFixed(2)} USDOG</span></div>
                 <div className="flex justify-between text-[10px] text-[#5b6472] mt-0.5">
                   <span></span>
-                  <span>≈ ${USDOG_POOL.toLocaleString()} USD · ₩{Math.round(USDOG_POOL * KRW_PER_USDOG).toLocaleString()} KRW</span>
+                  <span>≈ ${usdogPoolDisplay.toFixed(2)} USD · ₩{Math.round(usdogPoolDisplay * KRW_PER_USDOG).toLocaleString()} KRW</span>
                 </div>
               </div>
 
@@ -1322,10 +1415,10 @@ export default function App() {
               </div>
 
               <div>
-                <div className="flex justify-between"><span className="text-[#5b6472]">{t.marketCap}</span><span>{(price * SOG_TOTAL_SUPPLY).toLocaleString(undefined, { maximumFractionDigits: 0 })} USDOG</span></div>
+                <div className="flex justify-between"><span className="text-[#5b6472]">{t.marketCap}</span><span>{(price * sogSupply).toLocaleString(undefined, { maximumFractionDigits: 0 })} USDOG</span></div>
                 <div className="flex justify-between text-[10px] text-[#5b6472] mt-0.5">
                   <span></span>
-                  <span>≈ ${(price * SOG_TOTAL_SUPPLY).toLocaleString(undefined, { maximumFractionDigits: 0 })} USD · ₩{Math.round(price * SOG_TOTAL_SUPPLY * KRW_PER_USDOG).toLocaleString()} KRW</span>
+                  <span>≈ ${(price * sogSupply).toLocaleString(undefined, { maximumFractionDigits: 0 })} USD · ₩{Math.round(price * sogSupply * KRW_PER_USDOG).toLocaleString()} KRW</span>
                 </div>
               </div>
             </div>
